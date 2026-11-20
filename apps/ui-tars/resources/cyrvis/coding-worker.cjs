@@ -15,9 +15,8 @@ const SAFE_COMMANDS = [
   /^npm(?:\.cmd)?\s+run\s+test(?:\s+.*)?$/i,
   /^npx(?:\.cmd)?\s+vitest(?:\s+.*)?$/i,
   /^pytest(?:\s+.*)?$/i,
-  /^python(?:3)?(?:\.exe)?\s+(?:-u\s+)?[\w./\\-]+\.py(?:\s+.*)?$/i,
+  /^(?:python(?:3)?(?:\.exe)?|py(?:\.exe)?)\s+(?:(?:-u|-2|-3)\s+)*(?:"[^"]+\.py"|'[^']+\.py'|[A-Za-z]:[\\/][^\s]+\.py|[^\s]+\.py)(?:\s+.*)?$/i,
   /^python(?:3)?(?:\.exe)?\s+-m\s+pytest(?:\s+.*)?$/i,
-  /^py(?:\.exe)?\s+(?:-u\s+)?[\w./\\-]+\.py(?:\s+.*)?$/i,
   /^git(?:\.exe)?\s+(?:status|diff)(?:\s+.*)?$/i,
   /^(?:dir|ls)(?:\s+.*)?$/i,
 ];
