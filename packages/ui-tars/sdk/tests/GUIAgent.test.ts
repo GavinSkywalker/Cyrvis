@@ -614,4 +614,86 @@ describe('GUIAgent', () => {
 
     expect(onError).not.toHaveBeenCalled();
   });
+
+  it('aborts an in-flight operator action immediately', async () => {
+    const abortController = new AbortController();
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+
+    class SlowOperator extends Operator {
+      screenshot = vi.fn().mockImplementation(async () => {
+        const buffer = await image.getBuffer('image/png');
+        return {
+          base64: buffer.toString('base64'),
+          width: 1920,
+          height: 1080,
+          scaleFactor: 1,
+        };
+      });
+
+      execute = vi
+        .fn()
+        .mockImplementation(
+          async ({
+            parsedPrediction,
+            signal,
+          }: {
+            parsedPrediction: { action_type: string };
+            signal?: AbortSignal;
+          }) => {
+            if (parsedPrediction.action_type === 'user_stop') return;
+            markStarted();
+            await new Promise<void>((_resolve, reject) => {
+              const onAbort = () => {
+                const error = new Error('Request was aborted.');
+                error.name = 'AbortError';
+                reject(error);
+              };
+              if (signal?.aborted) {
+                onAbort();
+                return;
+              }
+              signal?.addEventListener('abort', onAbort, { once: true });
+            });
+          },
+        );
+    }
+
+    const model = new UITarsModel({ apiKey: 'test-key', model: 'test-model' });
+    vi.spyOn(model, 'invoke').mockResolvedValue({
+      prediction: 'Action: click()',
+      parsedPredictions: [
+        {
+          action_type: 'click',
+          action_inputs: { start_box: '[0.5,0.5,0.5,0.5]' },
+        },
+      ],
+    });
+    const statuses: StatusEnum[] = [];
+    const operator = new SlowOperator();
+    const agent = new GUIAgent({
+      model,
+      operator,
+      signal: abortController.signal,
+      retry: { execute: { maxRetries: 1 } },
+      logger: {
+        info: vi.fn(),
+        log: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      },
+      onData: ({ data }) => statuses.push(data.status),
+    });
+
+    const run = agent.run('click');
+    await started;
+    const stoppedAt = Date.now();
+    abortController.abort();
+    await run;
+
+    expect(Date.now() - stoppedAt).toBeLessThan(1_000);
+    expect(statuses.at(-1)).toBe(StatusEnum.USER_STOPPED);
+  });
 });

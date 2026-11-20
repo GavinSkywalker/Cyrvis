@@ -253,6 +253,7 @@ export class VoiceBrain {
   // After a bare "停/暂停", do not let the model speak an acknowledgment.
   // The user expects the audio to stop, not a new reply confirming it.
   private suppressReplyUntil = 0;
+  private userStopped = false;
   private stopToolGuardUntil = 0;
   private taskSpeechGuardUntil = 0;
   private pendingBargeStopAt = 0;
@@ -305,6 +306,12 @@ export class VoiceBrain {
     );
     this.taskConversation = new TaskConversationCoordinator({
       speak: (text) => {
+        if (this.userStopped || this.shouldSuppressReply()) {
+          console.log('[cyrvis voice] task speech suppressed after stop', {
+            text,
+          });
+          return;
+        }
         if (!this.awake) {
           this.wake();
         }
@@ -520,6 +527,7 @@ export class VoiceBrain {
     // Qwen can start a follow-up response 2-3s after the barge audio was
     // cancelled. 3s covers the observed 2.3s follow-up while still allowing
     // a real new command to clear the window immediately.
+    this.userStopped = true;
     this.suppressReplyUntil = Date.now() + 3000;
     this.stopToolGuardUntil = Date.now() + 3000;
     this.clearUserResponseWatchdog();
@@ -788,7 +796,7 @@ export class VoiceBrain {
     // command in the same turn. Ask the user to repeat a new command after the
     // stop if they actually want one.
     const leadingStop =
-      /^(?:呃|啊|哦|嗯|唉|诶|好|ok)?[，,\s]*(先停一下|先停|停一下|停一停|停下来|停下|停止|停|别说了|不要说了|取消|算了|stop|cancel|abort)[，,\s]*(.*)$/i.exec(
+      /^(?:呃|啊|哦|嗯|唉|诶|好|ok)?[，,\s]*(?:马上|赶紧|赶快|立刻|立即|快点|快|现在就|现在|先|给我)?[，,\s]*(先停一下|先停|停一下|停一停|停下来|停下|停住|停止|停|别动|不要动|住手|别说了|不要说了|别念了|不要念了|闭嘴|安静|取消|算了|stop|cancel|abort)[，,\s]*(.*)$/i.exec(
         text,
       );
     if (
@@ -941,6 +949,7 @@ export class VoiceBrain {
       ) {
         this.suppressReplyUntil = 0;
         this.stopToolGuardUntil = 0;
+        this.userStopped = false;
         console.log('[cyrvis voice] new command after stop; allowing reply');
       }
     }
@@ -1093,6 +1102,7 @@ export class VoiceBrain {
     this.options.snoozeProactiveGaze?.();
     this.gazeSuggestion = null;
     this.lastActionableUserText = text;
+    this.userStopped = false;
     this.suppressReplyUntil = 0;
     this.wake();
     if (
@@ -2939,6 +2949,7 @@ export class VoiceBrain {
     if (!isContinueOnly) {
       return false;
     }
+    this.userStopped = false;
     this.provider.cancelResponse();
     const status = this.controller.getStatus().status;
     if (status === 'paused') {
@@ -2967,7 +2978,7 @@ export class VoiceBrain {
   }
 
   private isStopFragment(text: string): boolean {
-    return /^(?:停|停了|停下|停住|停止|停一下|下|住|止|别说了|不要说了|算了|取消)[。！？!?，,\s]*$/i.test(
+    return /^(?:马上|赶紧|赶快|立刻|立即|快点|快|现在|先)?(?:停|停了|停下|停住|停止|停一下|下|住|止|别动|不要动|住手|别说了|不要说了|别念了|不要念了|闭嘴|安静|算了|取消)[。！？!?，,\s]*$/i.test(
       text.trim(),
     );
   }
@@ -2976,7 +2987,7 @@ export class VoiceBrain {
     const compact = text
       .replace(/[，。！？、,.!?;；:：\s]/g, '')
       .replace(/^(?:呃|啊|哦|嗯|唉|诶)+/i, '');
-    return /^(?:停|停一下|停一停|停下|停下来|停止|先停|别做|别做了|不要做|不要做了|取消|算了|stop|cancel|abort)(?:之前(?:的)?|目前|当前|这个|所有)?(?:任务|操作)?(?:吧|啊|呀|好吗|好不好)?$/i.test(
+    return /^(?:马上|赶紧|赶快|立刻|立即|快点|快|现在就|现在|先|给我)*(?:停|停一下|停一停|停下|停下来|停住|停止|先停|别做|别做了|不要做|不要做了|别动|不要动|住手|别说了|不要说了|别念了|不要念了|闭嘴|安静|取消|算了|stop|cancel|abort)(?:之前(?:的)?|目前|当前|这个|所有)?(?:任务|操作)?(?:吧|啊|呀|好吗|好不好)?$/i.test(
       compact,
     );
   }
@@ -2996,6 +3007,7 @@ export class VoiceBrain {
     this.lastHardStopAt = Date.now();
     this.pendingBargeStopAt = 0;
     this.provider.cancelResponse();
+    this.provider.cancelPendingSpeech?.();
     this.markUserStop();
     this.taskConversation.markStopped();
     this.lastDeterministicControl = { kind: 'cancel', at: Date.now() };
@@ -3155,7 +3167,7 @@ export class VoiceBrain {
   }
 
   notifyCodingStatus(snapshot: CodingTaskSnapshot): void {
-    if (snapshot.status === 'idle') {
+    if (snapshot.status === 'idle' || this.userStopped) {
       return;
     }
     if (snapshot.status === 'running') {
@@ -3187,7 +3199,7 @@ export class VoiceBrain {
   }
 
   private notifyCodingProgress(snapshot: CodingTaskSnapshot): void {
-    if (!this.awake || this.userSpeaking) {
+    if (this.userStopped || !this.awake || this.userSpeaking) {
       return;
     }
     const event = snapshot.lastEvent;

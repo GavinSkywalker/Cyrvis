@@ -238,4 +238,29 @@ describe('execute', () => {
       straightTo(new Point(138.24, 589.68)),
     );
   });
+
+  it('aborts a wait action immediately when the user stops', async () => {
+    const nutJSOperator = new NutJSOperator();
+    const abortController = new AbortController();
+    const executeParams: ExecuteParams = {
+      prediction: 'Action: wait()',
+      parsedPrediction: {
+        reflection: '',
+        thought: '',
+        action_type: 'wait',
+        action_inputs: {},
+      },
+      screenWidth: 1920,
+      screenHeight: 1080,
+      scaleFactor: 1,
+      signal: abortController.signal,
+    };
+
+    const startedAt = Date.now();
+    const execution = nutJSOperator.execute(executeParams);
+    setTimeout(() => abortController.abort(), 30);
+
+    await expect(execution).rejects.toMatchObject({ name: 'AbortError' });
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  });
 });

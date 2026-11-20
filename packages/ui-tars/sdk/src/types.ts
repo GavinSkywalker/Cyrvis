@@ -27,6 +27,8 @@ export interface ExecuteParams {
   scaleFactor: number;
   /** model coordinates scaling factor [widthFactor, heightFactor] */
   factors: Factors;
+  /** Abort an in-flight operator action as soon as the user stops. */
+  signal?: AbortSignal;
 }
 
 export type ExecuteOutput = { status: StatusEnum } & (object | void);

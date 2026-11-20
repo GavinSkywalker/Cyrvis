@@ -13,7 +13,6 @@ import {
   Message,
 } from '@ui-tars/shared/types';
 import { IMAGE_PLACEHOLDER, MAX_LOOP_COUNT } from '@ui-tars/shared/constants';
-import { sleep } from '@ui-tars/shared/utils';
 import asyncRetry from 'async-retry';
 import { Jimp } from 'jimp';
 import { v4 as uuidv4 } from 'uuid';
@@ -40,6 +39,58 @@ import { InternalServerError } from 'openai';
 // UI a moment to settle (focus after click, text before Enter) so the next
 // action does not race the previous one.
 const BATCH_ACTION_DELAY_MS = 200;
+
+const abortError = (): Error => {
+  const error = new Error('Request was aborted.') as Error & {
+    bail?: boolean;
+  };
+  error.name = 'AbortError';
+  // Stop retrying immediately; an aborted action must not wait or retry.
+  error.bail = true;
+  return error;
+};
+
+const sleepWithAbort = (ms: number, signal?: AbortSignal): Promise<void> =>
+  new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError());
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+
+const raceWithAbort = <T>(
+  promise: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> => {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener('abort', onAbort);
+      reject(abortError());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+};
 
 export class GUIAgent<T extends Operator> extends BaseGUIAgent<
   GUIAgentConfig<T>
@@ -210,7 +261,7 @@ export class GUIAgent<T extends Operator> extends BaseGUIAgent<
         if (!isValidImage) {
           loopCnt -= 1;
           snapshotErrCnt += 1;
-          await sleep(1000);
+          await sleepWithAbort(1000, signal);
           continue;
         }
 
@@ -380,7 +431,7 @@ export class GUIAgent<T extends Operator> extends BaseGUIAgent<
         let actionIndex = 0;
         for (const parsedPrediction of executablePredictions) {
           if (actionIndex > 0 && executablePredictions.length > 1) {
-            await sleep(BATCH_ACTION_DELAY_MS);
+            await sleepWithAbort(BATCH_ACTION_DELAY_MS, signal);
           }
           actionIndex += 1;
           const actionType = parsedPrediction.action_type;
@@ -417,21 +468,36 @@ export class GUIAgent<T extends Operator> extends BaseGUIAgent<
             );
             // TODO: pass executeOutput to onData
             const executeOutput = await asyncRetry(
-              () =>
-                operator.execute({
-                  prediction,
-                  parsedPrediction,
-                  screenWidth: width,
-                  screenHeight: height,
-                  scaleFactor: snapshot.scaleFactor,
-                  factors: this.model.factors,
-                }),
+              () => {
+                if (signal?.aborted || this.isStopped) {
+                  throw abortError();
+                }
+                return raceWithAbort(
+                  operator.execute({
+                    prediction,
+                    parsedPrediction,
+                    screenWidth: width,
+                    screenHeight: height,
+                    scaleFactor: snapshot.scaleFactor,
+                    factors: this.model.factors,
+                    signal,
+                  }),
+                  signal,
+                );
+              },
               {
                 retries: retry?.execute?.maxRetries ?? 0,
                 minTimeout: 5000,
                 onRetry: retry?.execute?.onRetry,
               },
             ).catch((e) => {
+              if (
+                signal?.aborted ||
+                this.isStopped ||
+                (e instanceof Error && e.name === 'AbortError')
+              ) {
+                throw e;
+              }
               logger.error('[GUIAgent] execute error', e);
               Object.assign(data, {
                 status: StatusEnum.ERROR,
@@ -461,7 +527,7 @@ export class GUIAgent<T extends Operator> extends BaseGUIAgent<
           logger.info(
             `[GUIAgent] sleep for ${this.config.loopIntervalInMs}ms before next loop`,
           );
-          await sleep(this.config.loopIntervalInMs);
+          await sleepWithAbort(this.config.loopIntervalInMs, signal);
           logger.info(
             `[GUIAgent] sleep for ${this.config.loopIntervalInMs}ms before next loop done`,
           );

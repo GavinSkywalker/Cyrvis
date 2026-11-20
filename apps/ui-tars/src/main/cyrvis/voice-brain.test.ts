@@ -932,6 +932,27 @@ describe('VoiceBrain', () => {
     expect(controller.getStatus().status).toBe('cancelled');
   });
 
+  it('treats urgent stop phrasings as a hard stop', async () => {
+    const { brain, provider, controller } = setup();
+    await brain.start();
+    provider.emitTranscript('Hello CYRVIS', true);
+    provider.emitTranscript('Open Notepad and type hello', true);
+    provider.emitToolCall({
+      name: 'start_gui_task',
+      args: { instruction: 'Open Notepad and type hello' },
+      callId: 'call-start',
+    });
+    await flush();
+
+    provider.emitTranscript('马上停', true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(controller.getStatus().status).toBe('cancelled');
+    expect(provider.spoken.some((text) => text.includes('任务已取消'))).toBe(
+      false,
+    );
+  });
+
   it('blocks a queued tool call after a stop barge', async () => {
     const { brain, provider, adapter } = setup();
     await brain.start();

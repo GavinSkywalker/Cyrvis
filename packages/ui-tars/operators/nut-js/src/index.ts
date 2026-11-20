@@ -21,11 +21,41 @@ import {
   centerOf,
   keyboard,
   mouse,
-  sleep,
   straightTo,
   clipboard,
 } from '@computer-use/nut-js';
 import Big from 'big.js';
+
+const abortError = (): Error => {
+  const error = new Error('Request was aborted.') as Error & {
+    bail?: boolean;
+  };
+  error.name = 'AbortError';
+  // async-retry must not retry an action after the user stopped.
+  error.bail = true;
+  return error;
+};
+
+const throwIfAborted = (signal?: AbortSignal): void => {
+  if (signal?.aborted) throw abortError();
+};
+
+const sleepWithAbort = (ms: number, signal?: AbortSignal): Promise<void> =>
+  new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError());
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 
 const moveStraightTo = async (startX: number | null, startY: number | null) => {
   if (startX === null || startY === null) {
@@ -93,7 +123,9 @@ export class NutJSOperator extends Operator {
 
   async execute(params: ExecuteParams): Promise<ExecuteOutput> {
     const { logger } = useContext();
-    const { parsedPrediction, screenWidth, screenHeight, scaleFactor } = params;
+    const { parsedPrediction, screenWidth, screenHeight, scaleFactor, signal } =
+      params;
+    throwIfAborted(signal);
 
     const { action_type, action_inputs } = parsedPrediction;
     const startBoxStr = action_inputs?.start_box || '';
@@ -173,7 +205,7 @@ export class NutJSOperator extends Operator {
     switch (action_type) {
       case 'wait':
         logger.info('[NutjsOperator] wait', action_inputs);
-        await sleep(5000);
+        await sleepWithAbort(5000, signal);
         break;
 
       case 'mouse_move':
@@ -187,7 +219,7 @@ export class NutJSOperator extends Operator {
       case 'left_single':
         logger.info('[NutjsOperator] left_click');
         await moveStraightTo(startX, startY);
-        await sleep(100);
+        await sleepWithAbort(100, signal);
         await mouse.click(Button.LEFT);
         break;
 
@@ -195,7 +227,7 @@ export class NutJSOperator extends Operator {
       case 'double_click':
         logger.info(`[NutjsOperator] ${action_type}(${startX}, ${startY})`);
         await moveStraightTo(startX, startY);
-        await sleep(100);
+        await sleepWithAbort(100, signal);
         await mouse.doubleClick(Button.LEFT);
         break;
 
@@ -203,7 +235,7 @@ export class NutJSOperator extends Operator {
       case 'right_single':
         logger.info('[NutjsOperator] right_click');
         await moveStraightTo(startX, startY);
-        await sleep(100);
+        await sleepWithAbort(100, signal);
         await mouse.click(Button.RIGHT);
         break;
 
@@ -230,7 +262,7 @@ export class NutJSOperator extends Operator {
             );
             // 先移动鼠标到 startX, startY 位置
             await moveStraightTo(startX, startY);
-            await sleep(100);
+            await sleepWithAbort(100, signal);
             await mouse.drag(straightTo(new Point(endX, endY)));
           }
         }
@@ -247,9 +279,9 @@ export class NutJSOperator extends Operator {
             const originalClipboard = await clipboard.getContent();
             await clipboard.setContent(stripContent);
             await keyboard.pressKey(Key.LeftControl, Key.V);
-            await sleep(50);
+            await sleepWithAbort(50, signal);
             await keyboard.releaseKey(Key.LeftControl, Key.V);
-            await sleep(50);
+            await sleepWithAbort(50, signal);
             await clipboard.setContent(originalClipboard);
           } else {
             await keyboard.type(stripContent);
