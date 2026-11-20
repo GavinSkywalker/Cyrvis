@@ -3129,8 +3129,15 @@ export class VoiceBrain {
       '[任务仍在执行，已拦截提前完成声明]',
       true,
     );
+    const task = this.controller.getStatus();
+    const atTaskStart =
+      task.startedAt !== null && Date.now() - task.startedAt < 5_000;
     setTimeout(() => {
-      this.speak('好的，我正在执行，请稍等。');
+      this.speak(
+        atTaskStart
+          ? '任务已开始。我正在执行，请稍等。'
+          : '好的，我正在执行，请稍等。',
+      );
     }, 300);
   }
 

@@ -890,6 +890,9 @@ describe('VoiceBrain', () => {
     expect(provider.spoken.some((text) => text.includes('正在执行'))).toBe(
       true,
     );
+    expect(provider.spoken.some((text) => text.includes('任务已开始'))).toBe(
+      true,
+    );
     expect(adapter.instruction).toBe('Open Notepad and type hello');
   });
 
