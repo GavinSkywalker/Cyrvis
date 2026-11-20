@@ -814,6 +814,11 @@ export class VoiceBrain {
       return true;
     }
 
+    // A real user turn after a stop re-opens task/coding speech. Do not wait
+    // for the 3s anti-acknowledgment window to expire: a coding task may
+    // finish long after that and its result must still be announced.
+    this.userStopped = false;
+
     if (this.handleContinueCommand(text)) {
       return true;
     }
@@ -1163,7 +1168,7 @@ export class VoiceBrain {
         );
       } else if (coding.status === 'done') {
         const summary = this.summarizeCodingResult(coding.result);
-        this.speak(
+        this.speakCodingSummary(
           summary ? `编码任务已完成。总结：${summary}` : '编码任务已完成。',
         );
       } else if (coding.status === 'failed') {
@@ -3191,7 +3196,7 @@ export class VoiceBrain {
     }
     if (snapshot.status === 'done') {
       const summary = this.summarizeCodingResult(snapshot.result);
-      this.speak(
+      this.speakCodingSummary(
         summary ? `编码任务完成。总结：${summary}` : '编码任务已完成。',
       );
     } else if (snapshot.status === 'failed') {
@@ -3267,18 +3272,36 @@ export class VoiceBrain {
     // output the user explicitly asked to hear. Only strip the fence markers.
     const normalized = result
       .replace(/```[a-z0-9_-]*\n?([\s\S]*?)```/gi, ' $1 ')
+      .replace(/[A-Za-z]:\\[^\s`'"，。；;]+/g, (value) =>
+        path.win32.basename(value.replace(/\//g, '\\')),
+      )
       .replace(/[|]{1,}/g, ' ')
       .replace(/-{3,}/g, ' ')
+      .replace(/\*{2,}/g, '')
       .replace(/`([^`]*)`/g, '$1')
       .replace(/\s+/g, ' ')
       .trim();
-    const runIndex = normalized.search(/(?:运行结果|执行结果|输出|exit code)/i);
+    let runIndex = normalized.search(
+      /(?:运行输出|执行输出|输出结果|遍历顺序)/i,
+    );
+    if (runIndex < 0) {
+      runIndex = normalized.search(/(?:运行结果|执行结果|exit code|退出码)/i);
+    }
     if (runIndex >= 0) {
       const before = normalized.slice(0, runIndex).slice(0, 90);
       const after = normalized.slice(runIndex).slice(0, 150);
       return `${before} ${after}`.trim();
     }
     return normalized.slice(0, 180);
+  }
+
+  private speakCodingSummary(text: string): void {
+    // A coding result can be a long paragraph. Keep the speaker-mode energy
+    // barge from treating the assistant's own TTS tail as an interruption
+    // while it reads the result. KWS stop words and Ctrl+Alt+X still cancel.
+    this.taskSpeechGuardUntil =
+      Date.now() + Math.min(25_000, Math.max(2_500, text.length * 220));
+    this.speak(text);
   }
 
   private speak(text: string): void {

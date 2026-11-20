@@ -1108,6 +1108,35 @@ describe('VoiceBrain', () => {
     expect(adapter.instruction).toBe('');
   });
 
+  it('announces coding completion after a later user turn following a stop', async () => {
+    const { brain, provider } = setup({ requireWakeWord: false });
+    await brain.start();
+    brain.markUserStop();
+
+    // The user waits past the 3s anti-acknowledgment window, then speaks.
+    provider.emitTranscript('现在进展怎么样', true);
+    await flush();
+
+    brain.notifyCodingStatus({
+      taskId: 'coding-1',
+      status: 'done',
+      instruction: '写一个 BFS 示例',
+      workspace: 'D:/demo',
+      startedAt: 1,
+      endedAt: 2,
+      lastMessage: '运行完成',
+      lastEvent: null,
+      result: '已创建 bfs.py 并成功运行（退出码 0）。运行输出：遍历顺序 A B C',
+      diff: '',
+      changedFiles: ['D:/demo/bfs.py'],
+      error: null,
+    });
+
+    expect(provider.spoken.some((text) => text.includes('编码任务完成'))).toBe(
+      true,
+    );
+  });
+
   it('speaks only key coding nodes and reports command output', async () => {
     const { brain, provider } = setup({ requireWakeWord: false });
     await brain.start();
