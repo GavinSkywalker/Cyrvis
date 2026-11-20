@@ -45,7 +45,7 @@ export const isLikelySpeakerEcho = (
   transcript: string,
   assistantText: string,
   assistantAgeMs: number,
-  maxAgeMs = 15_000,
+  maxAgeMs = 6_000,
 ): boolean => {
   if (assistantAgeMs < 0 || assistantAgeMs > maxAgeMs) {
     return false;

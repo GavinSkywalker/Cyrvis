@@ -5,6 +5,8 @@ export * from './context-budget';
 export * from './dynamic-context';
 export * from './event-bus';
 export * from './foreground-monitor';
+export * from './intent-fusion';
+export * from './user-timeline';
 export * from './perception';
 export * from './relevance-engine';
 export * from './resource-catalog';

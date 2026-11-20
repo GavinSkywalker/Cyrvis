@@ -71,6 +71,8 @@ export interface RecentFileState {
 
 export interface SystemStateSnapshot {
   capturedAt: number;
+  runtimeObservedAt: number;
+  fullObservedAt: number;
   platform: NodeJS.Platform;
   release: string;
   version: string;

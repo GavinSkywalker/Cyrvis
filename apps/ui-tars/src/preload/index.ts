@@ -5,7 +5,7 @@
 import { IpcRendererEvent, contextBridge, ipcRenderer } from 'electron';
 // import { preloadZustandBridge } from 'zutron/preload';
 
-import type { CompanionSnapshot } from '@shared/companion';
+import type { CompanionSnapshot, CompanionTask } from '@shared/companion';
 import type { UTIOPayload } from '@ui-tars/utio';
 
 import type { AppState, LocalStore } from '@main/store/types';
@@ -27,6 +27,12 @@ import type {
   QwenTtsVoiceEnrollmentInput,
 } from '@shared/qwenTtsRealtime';
 import type { BreezeTtsVoice } from '@shared/breezeTts';
+import type {
+  CapabilityProposalView,
+  RuntimeMemoryView,
+  RuntimeSnapshotView,
+  RuntimeTaskView,
+} from '@shared/orchestration';
 
 export type Channels = '';
 
@@ -451,6 +457,66 @@ const electronHandler = {
       const listener = () => callback();
       ipcRenderer.on('cyrvis:voice:sleep', listener);
       return () => ipcRenderer.removeListener('cyrvis:voice:sleep', listener);
+    },
+  },
+  runtime: {
+    getSnapshot: () =>
+      ipcRenderer.invoke(
+        'cyrvis:runtime:snapshot',
+      ) as Promise<RuntimeSnapshotView | null>,
+    getTasks: (activeOnly = false) =>
+      ipcRenderer.invoke('cyrvis:runtime:tasks', activeOnly) as Promise<
+        RuntimeTaskView[]
+      >,
+    taskAction: (
+      action: 'pause' | 'resume' | 'cancel' | 'confirm' | 'retry',
+      taskId: string,
+    ) =>
+      ipcRenderer.invoke(
+        'cyrvis:runtime:task-action',
+        action,
+        taskId,
+      ) as Promise<RuntimeTaskView | null>,
+    configureAutonomy: (
+      mode: 'off' | 'suggest' | 'low-risk',
+      maxPerHour?: number,
+    ) =>
+      ipcRenderer.invoke('cyrvis:runtime:autonomy-configure', mode, maxPerHour),
+    autonomyAction: (action: 'accept' | 'reject', proposalId: string) =>
+      ipcRenderer.invoke('cyrvis:runtime:autonomy-action', action, proposalId),
+    capabilityAction: (action: 'approve' | 'reject', proposalId: string) =>
+      ipcRenderer.invoke(
+        'cyrvis:runtime:capability-action',
+        action,
+        proposalId,
+      ) as Promise<CapabilityProposalView | null>,
+    getMemory: (limit = 100) =>
+      ipcRenderer.invoke('cyrvis:runtime:memory', limit) as Promise<
+        RuntimeMemoryView[]
+      >,
+    clearMemory: () =>
+      ipcRenderer.invoke('cyrvis:runtime:clear-memory') as Promise<void>,
+    onSnapshot: (callback: (snapshot: RuntimeSnapshotView) => void) => {
+      const listener = (
+        _event: IpcRendererEvent,
+        snapshot: RuntimeSnapshotView,
+      ) => callback(snapshot);
+      ipcRenderer.on('cyrvis:runtime:snapshot', listener);
+      return () => {
+        ipcRenderer.removeListener('cyrvis:runtime:snapshot', listener);
+      };
+    },
+  },
+  tasks: {
+    getStack: () =>
+      ipcRenderer.invoke('cyrvis:tasks:stack') as Promise<CompanionTask[]>,
+    onStack: (callback: (tasks: CompanionTask[]) => void) => {
+      const listener = (_event: IpcRendererEvent, tasks: CompanionTask[]) =>
+        callback(tasks);
+      ipcRenderer.on('cyrvis:tasks:stack', listener);
+      return () => {
+        ipcRenderer.removeListener('cyrvis:tasks:stack', listener);
+      };
     },
   },
 };

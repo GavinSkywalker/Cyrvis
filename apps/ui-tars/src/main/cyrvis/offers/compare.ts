@@ -61,6 +61,15 @@ export const rankOffers = (
     1,
     ...usable.map((offer) => offer.conditions.baggageKg || 0),
   );
+  const durations = usable
+    .map((offer) => offer.conditions.durationMinutes)
+    .filter(
+      (value): value is number =>
+        typeof value === 'number' && Number.isFinite(value) && value > 0,
+    );
+  const minDuration = durations.length ? Math.min(...durations) : 0;
+  const maxDuration = durations.length ? Math.max(...durations) : 0;
+  const durationSpan = Math.max(1, maxDuration - minDuration);
 
   const ranked: RankedOffer[] = usable.map((offer) => {
     const priceScore = 1 - (offer.totalPrice - minPrice) / priceSpan;
@@ -70,12 +79,17 @@ export const rankOffers = (
     );
     const refundScore = offer.conditions.refundable ? 1 : 0;
     const convenienceScore = timeScore(offer.conditions.departureTime);
+    const durationScore =
+      typeof offer.conditions.durationMinutes === 'number' && durations.length
+        ? 1 - (offer.conditions.durationMinutes - minDuration) / durationSpan
+        : 0;
     const score =
       clamp01(priceScore) * weights.price +
       directScore * weights.direct +
       baggageScore * weights.baggage +
       refundScore * weights.refundable +
-      convenienceScore * weights.convenience;
+      convenienceScore * weights.convenience +
+      clamp01(durationScore) * (weights.duration || 0);
 
     return {
       ...offer,

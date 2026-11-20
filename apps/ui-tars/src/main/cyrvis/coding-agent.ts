@@ -52,6 +52,14 @@ export interface CodingAgentOptions {
   maxDurationMs?: number;
 }
 
+export interface CodingAgentController {
+  getStatus(): CodingTaskSnapshot;
+  getWorkspace(): string;
+  isBusy(): boolean;
+  start(instruction: string): Promise<CodingTaskSnapshot>;
+  cancel(): Promise<CodingTaskSnapshot>;
+}
+
 const redactSecrets = (value: string): string =>
   value
     .replace(/sk-[A-Za-z0-9._-]{8,}/g, 'sk-***')

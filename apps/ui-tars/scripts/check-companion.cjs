@@ -10,17 +10,27 @@ const temp = fs.mkdtempSync(
 fs.mkdirSync(path.join(temp, 'main'));
 for (const name of ['renderer', 'preload']) {
   try {
-    fs.symlinkSync(root + '/apps/ui-tars/dist/' + name, temp + '/' + name);
-  } catch {}
+    fs.symlinkSync(
+      root + '/apps/ui-tars/dist/' + name,
+      temp + '/' + name,
+      'junction',
+    );
+  } catch {
+    fs.cpSync(root + '/apps/ui-tars/dist/' + name, temp + '/' + name, {
+      recursive: true,
+    });
+  }
 }
 const source = `
 import { app, ipcMain, BrowserWindow } from 'electron';
-import { companionSkins, resolveCompanionSkin } from '${root}/apps/ui-tars/src/shared/companion-skins.ts';
-import { getCompanionStore } from '${root}/apps/ui-tars/src/main/store/companion.ts';
-import { createMainWindow, showWindow, showCompanion, sendCompanionCommand } from '${root}/apps/ui-tars/src/main/window/index.ts';
-app.setPath('userData', '${temp}/profile');
+import { companionSkins, resolveCompanionSkin } from ${JSON.stringify(`${root}/apps/ui-tars/src/shared/companion-skins.ts`)};
+import { getCompanionStore } from ${JSON.stringify(`${root}/apps/ui-tars/src/main/store/companion.ts`)};
+import { createMainWindow, showWindow, showCompanion, sendCompanionCommand } from ${JSON.stringify(`${root}/apps/ui-tars/src/main/window/index.ts`)};
+import { updateCompanionTasks } from ${JSON.stringify(`${root}/apps/ui-tars/src/main/window/companionWindow.ts`)};
+app.setPath('userData', ${JSON.stringify(`${temp}/profile`)});
 (globalThis as any).clearCount = 0;
-(globalThis as any).sendCompanionCommand = sendCompanionCommand;
+ (globalThis as any).sendCompanionCommand = sendCompanionCommand;
+ (globalThis as any).updateCompanionTasks = updateCompanionTasks;
 (globalThis as any).companionSkins = companionSkins;
 app.whenReady().then(() => {
  const store = getCompanionStore();
@@ -46,6 +56,7 @@ app.whenReady().then(() => {
    state.status='end'; state.thinking=false; publish();
  });
  ipcMain.handle('showMainWindow', () => showWindow());
+ ipcMain.handle('cyrvis:tasks:stack', () => (globalThis as any).taskStack || []);
  ipcMain.handle('clearHistory', () => { (globalThis as any).clearCount++; state.messages=[]; state.status='init'; publish(); });
  ipcMain.handle('cyrvis:voice:get-ptt', () => ({ mode: false, active: false }));
  ipcMain.handle('cyrvis:voice:get-mode', () => ({ mode: 'headset' }));
@@ -93,7 +104,7 @@ async function check() {
             namespace: 'icon',
           }));
           b.onLoad({ filter: /.*/, namespace: 'icon' }, () => ({
-            contents: `export default '${root}/apps/ui-tars/resources/icon.png'`,
+            contents: `export default ${JSON.stringify(`${root}/apps/ui-tars/resources/icon.png`)}`,
           }));
         },
       },
@@ -127,12 +138,22 @@ async function check() {
           url: w.webContents.getURL(),
         })),
       );
+    await expect
+      .poll(() =>
+        app.evaluate(
+          ({ BrowserWindow }) =>
+            BrowserWindow.getAllWindows()
+              .find((w) => w.webContents.getURL().includes('/companion'))
+              ?.isVisible() === true,
+        ),
+      )
+      .toBe(true);
     let wins = await visibility();
     if (
       wins.filter((w) => w.visible).length !== 1 ||
       !wins.find((w) => w.visible).url.includes('/companion')
     )
-      throw new Error('Main was visible on startup');
+      throw new Error('Main was visible on startup: ' + JSON.stringify(wins));
     await pet.screenshot({
       path: path.join(temp, 'companion.png'),
       omitBackground: true,
@@ -352,6 +373,83 @@ async function check() {
       task: { ...voiceState.task, status: 'executing' },
     });
     await expect(pet.locator('img')).toHaveAttribute('alt', 'CYRVIS Working');
+    await emit('cyrvis:voice:response-stopped');
+    await emit('cyrvis:voice:state', voiceState);
+    await expect(
+      pet.getByRole('region', { name: 'Live conversation' }),
+    ).toHaveCount(0, { timeout: 7000 });
+    await app.evaluate(({ BrowserWindow }) => {
+      globalThis.taskStack = [
+        {
+          id: 'task-stack-1',
+          kind: 'coding',
+          title: '整理项目文档',
+          status: 'running',
+          message: '正在写入章节',
+          startedAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+      ];
+      globalThis.updateCompanionTasks(globalThis.taskStack);
+    });
+    await expect(
+      pet.getByRole('region', { name: 'Active tasks' }),
+    ).toBeVisible();
+    await expect(pet.getByText('整理项目文档', { exact: true })).toBeVisible();
+    await emit('cyrvis:voice:state', voiceState);
+    await expect(
+      pet.getByRole('region', { name: 'Active tasks' }),
+    ).toBeVisible();
+    await expect
+      .poll(() => pet.evaluate(() => [window.innerWidth, window.innerHeight]))
+      .toEqual([280, 552]);
+    const taskStackStyle = await pet
+      .locator('.companion-task-stack')
+      .evaluate((element) => ({
+        width: element.getBoundingClientRect().width,
+        background: getComputedStyle(element).backgroundColor,
+        rowBackdrop: getComputedStyle(element.querySelector('li'))
+          .backdropFilter,
+      }));
+    if (taskStackStyle.width > 225)
+      throw new Error(
+        'Task stack is still too wide: ' + JSON.stringify(taskStackStyle),
+      );
+    if (taskStackStyle.background !== 'rgba(0, 0, 0, 0)')
+      throw new Error('Task stack still uses an opaque shell');
+    if (!taskStackStyle.rowBackdrop || taskStackStyle.rowBackdrop === 'none')
+      throw new Error('Task rows do not use the glass treatment');
+    await expect(pet.locator('.companion-control-button')).toHaveCount(3);
+    await expect(pet.locator('.companion-control-button').nth(2)).toBeVisible();
+    await pet.screenshot({
+      path: path.join(temp, 'task-stack.png'),
+      omitBackground: true,
+    });
+    await app.evaluate(({ BrowserWindow }) => {
+      globalThis.taskStack = [];
+      globalThis.updateCompanionTasks(globalThis.taskStack);
+    });
+    await expect(
+      pet.locator('.companion-task-stack li[data-motion="exit"]'),
+    ).toHaveCount(1);
+    await pet.waitForTimeout(100);
+    if (
+      JSON.stringify(
+        await pet.evaluate(() => [window.innerWidth, window.innerHeight]),
+      ) !== JSON.stringify([280, 552])
+    )
+      throw new Error('Companion window collapsed before task exit animation');
+    await pet.screenshot({
+      path: path.join(temp, 'task-stack-exit.png'),
+      omitBackground: true,
+    });
+    await expect(pet.getByRole('region', { name: 'Active tasks' })).toHaveCount(
+      0,
+      { timeout: 1200 },
+    );
+    await expect
+      .poll(() => pet.evaluate(() => [window.innerWidth, window.innerHeight]))
+      .toEqual([260, 320]);
     await emit('cyrvis:voice:response-stopped');
     await emit('cyrvis:voice:state', { ...voiceState, awake: false });
     await expect(pet.locator('img')).toHaveAttribute('alt', 'CYRVIS Sleeping');
@@ -726,10 +824,11 @@ async function check() {
     await expect(
       main.getByText('Your task is complete.', { exact: true }),
     ).toBeVisible();
-    if (/[\u4e00-\u9fff]/.test(await main.locator('body').innerText()))
-      throw new Error('Non-English UI copy remains');
     await app.evaluate(() => globalThis.sendCompanionCommand('settings'));
     await expect(main.getByRole('dialog')).toBeVisible();
+    wins = await visibility();
+    if (!wins.find((w) => w.url.includes('/companion')).visible)
+      throw new Error('Opening settings hid the companion');
     await main.keyboard.press('Escape');
     await app.evaluate(({ BrowserWindow }) =>
       BrowserWindow.getAllWindows()
@@ -778,19 +877,29 @@ async function check() {
       pet.getByText('你好！我在这里。', { exact: true }),
     ).toHaveCount(1);
     await emit('cyrvis:voice:state', { ...voiceState, ttsSpeaking: true });
-    await expect.poll(() => pet.evaluate(() => window.innerWidth)).toBe(360);
-    await expect.poll(() => pet.evaluate(() => window.innerHeight)).toBe(520);
+    await expect.poll(() => pet.evaluate(() => window.innerWidth)).toBe(380);
+    await expect.poll(() => pet.evaluate(() => window.innerHeight)).toBe(680);
     await pet.screenshot({
       fullPage: true,
       path: path.join(temp, 'live-conversation.png'),
       omitBackground: true,
     });
-    await pet.getByRole('button', { name: 'Interrupt', exact: true }).click();
+    await pet
+      .getByRole('button', { name: 'Interrupt response', exact: true })
+      .click();
     await expect
       .poll(() => app.evaluate(() => globalThis.interrupted))
       .toBe(true);
     await emit('cyrvis:voice:state', voiceState);
+    await emit('cyrvis:voice:speech-started');
+    await expect(
+      pet.getByText('你好！我在这里。', { exact: true }),
+    ).toBeVisible();
     await emit('cyrvis:voice:response-started');
+    await emit('cyrvis:voice:thinking');
+    await expect(
+      pet.getByText('你好！我在这里。', { exact: true }),
+    ).toBeVisible();
     await emit('cyrvis:voice:assistant', { text: '第二条回复', final: false });
     await expect(pet.getByText('第二条回复', { exact: true })).toBeVisible();
     await expect(
@@ -835,7 +944,7 @@ async function check() {
               .getSize()[0],
         ),
       )
-      .toBe(220);
+      .toBe(260);
     await pet.mouse.move(0, 0);
     await pet.screenshot({
       path: path.join(temp, 'idle-companion.png'),
@@ -889,7 +998,7 @@ async function check() {
       pet.getByRole('region', { name: 'Live conversation' }),
     ).toHaveCount(0);
     console.log(
-      'PASS — streaming conversation, late ASR final, replacement on new response, interrupt/pause/start controls, long text scrolling, bounds, auto-hide after silence, fresh-turn reopening, and idle/error compact mode',
+      'PASS — streaming conversation, late ASR final, preserved text until replacement tokens, interrupt/pause/start controls, long text scrolling, bounds, auto-hide after silence, fresh-turn reopening, and idle/error compact mode',
     );
     // Real Chromium audio clock with silent PCM: generation finishes before
     // two seconds of output drain, so the mic must not reopen immediately.

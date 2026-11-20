@@ -129,6 +129,7 @@ describe('dynamic capability matrix', () => {
     });
 
     try {
+      expect(matrix.registry.list()).toHaveLength(90);
       const initialTools = matrix.providerCatalog.tools.map(
         (tool) => tool.function.name,
       );
@@ -209,7 +210,7 @@ describe('dynamic capability matrix', () => {
     }
   });
 
-  it('routes a broker invocation through the existing confirmation state', async () => {
+  it('keeps high-risk broker capabilities behind confirmation', async () => {
     const desktop = new DynamicDesktopHost();
     const matrix = createFastToolMatrix(desktop, process.cwd());
     let executions = 0;
@@ -243,17 +244,17 @@ describe('dynamic capability matrix', () => {
     matrix.surface.refresh();
 
     try {
-      const pending = await matrix.router.executeProviderToolCall(
+      const execution = await matrix.router.executeProviderToolCall(
         'cyrvis_capability_invoke',
         {
           toolId: 'test.dangerous',
           arguments: {},
         },
       );
-      expect(pending?.outcome.ok).toBe(false);
-      expect(matrix.router.hasPendingConfirmation()).toBe(true);
+      expect(execution?.outcome.ok).toBe(false);
+      expect(execution?.outcome.speech).toBe('敏感操作，是否执行？');
       expect(executions).toBe(0);
-
+      expect(matrix.router.hasPendingConfirmation()).toBe(true);
       const confirmed = await matrix.router.handleText('确认执行');
       expect(confirmed.ok).toBe(true);
       expect(executions).toBe(1);

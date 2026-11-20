@@ -328,6 +328,72 @@ export const CYRVIS_VOICE_TOOLS: QwenToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'create_presentation',
+      description:
+        'Create a native PPTX directly with office.create_presentation. Use this for every PPT/演示文稿 request instead of capability.search, PowerPoint GUI automation, or start_gui_task. Pass the complete requirements as content. Complex/deck-style requests default to the configured cloud qwen-doc API; local PowerPoint is only a fallback for basic requests.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: {
+            type: 'string',
+            description:
+              'Optional target path. Defaults to a timestamped PPTX on the desktop.',
+          },
+          title: { type: 'string', description: 'Presentation title.' },
+          content: {
+            type: 'string',
+            description:
+              'Complete source brief, outline requirements, facts, and audience preferences.',
+          },
+          sourcePath: {
+            type: 'string',
+            description: 'Optional local source document path.',
+          },
+          pageCount: {
+            type: 'number',
+            minimum: 3,
+            maximum: 30,
+          },
+          audience: { type: 'string' },
+          templateId: {
+            type: 'string',
+            enum: ['news_01', 'summary_01', 'internet_01', 'thesis_01'],
+          },
+          mode: {
+            type: 'string',
+            enum: ['general', 'creative'],
+          },
+          provider: {
+            type: 'string',
+            enum: ['auto', 'qwen-doc', 'powerpoint', 'remote-api'],
+          },
+        },
+        required: ['title'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'close_webpage',
+      description:
+        'Close a specific browser page/tab by matching the title or URL the user named. Use this directly instead of a GUI task or repeated confirmation. If multiple tabs match, ask for a more specific title.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description:
+              'Visible tab title, site name, or URL fragment that identifies one page.',
+          },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'travel_update_plan',
       description:
         'Update the travel-plan basic framework (destination, origin, dates, companions, budget, purpose, transport). Use for trip/flight/hotel planning chat. Ask only missing required fields, then offer a skeleton guide. Do NOT call start_gui_task for planning.',

@@ -51,11 +51,22 @@ export interface CyrvisControllerOptions {
   idFactory?: () => string;
 }
 
+export interface TaskController {
+  onEvent(listener: (event: ControllerEvent) => void): () => void;
+  getStatus(): TaskSnapshot;
+  isBusy(): boolean;
+  startTask(instruction: string, source?: TaskSource): TaskSnapshot;
+  cancelTask(taskId?: string): Promise<TaskSnapshot>;
+  pauseTask(taskId?: string): Promise<TaskSnapshot>;
+  resumeTask(taskId?: string): Promise<TaskSnapshot>;
+  dispose(): void;
+}
+
 const TERMINAL_STATUSES: TaskStatus[] = ['idle', 'done', 'failed', 'cancelled'];
 
 const isTerminal = (status: TaskStatus) => TERMINAL_STATUSES.includes(status);
 
-export class CyrvisController {
+export class CyrvisController implements TaskController {
   private current: TaskRecord | null = null;
   private readonly listeners = new Set<(event: ControllerEvent) => void>();
   private stallTimer: ReturnType<typeof setTimeout> | null = null;

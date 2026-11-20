@@ -72,7 +72,6 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
   private proactiveItemPending = false;
   private proactiveDeleteRequested = false;
   private lastUserItemId: string | null = null;
-  private pendingSpeakExact = false;
   private cancelRequested = false;
   private localSpeechActive = false;
   private localSpeechMs = 0;
@@ -85,7 +84,11 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
     output: string;
     readoutId?: string;
   }> = [];
-  private pendingSpeak: { text: string; readoutId?: string } | null = null;
+  private pendingSpeak: Array<{
+    text: string;
+    exact: boolean;
+    readoutId?: string;
+  }> = [];
   private readoutId: string | undefined;
   private gazeContext = '';
   private assistantTextChannel: 'audio' | 'text' | undefined;
@@ -213,8 +216,7 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
     this.proactiveDeleteRequested = false;
     this.activeResponseId = null;
     this.pendingToolResults = [];
-    this.pendingSpeak = null;
-    this.pendingSpeakExact = false;
+    this.pendingSpeak = [];
     this.pendingUserText = null;
     this.proactivePending = false;
     this.readOnlySpeech = false;
@@ -294,12 +296,14 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
             'failed',
             '语音连接在播报期间断开，请重播。',
           );
-        if (this.pendingSpeak?.readoutId)
-          this.callbacks.onReadoutState?.(
-            this.pendingSpeak.readoutId,
-            'failed',
-            '语音连接已断开，请重播。',
-          );
+        for (const pending of this.pendingSpeak) {
+          if (pending.readoutId)
+            this.callbacks.onReadoutState?.(
+              pending.readoutId,
+              'failed',
+              '语音连接已断开，请重播。',
+            );
+        }
         this.readoutId = undefined;
         this.connected = false;
         this.ws = null;
@@ -497,20 +501,14 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
         'cancelled',
         '播报已停止。',
       );
-    if (this.pendingSpeak?.readoutId)
-      this.callbacks.onReadoutState?.(
-        this.pendingSpeak.readoutId,
-        'cancelled',
-        '排队播报已取消。',
-      );
+    this.cancelPendingSpeech();
     this.readoutId = undefined;
     this.cancelRequested = true;
     this.responseActive = false;
     this.awaitingResponse = false;
     this.activeResponseId = null;
     this.deleteProactiveItem();
-    this.pendingSpeak = null;
-    this.pendingSpeakExact = false;
+    this.pendingSpeak = [];
     this.pendingUserText = null;
     this.pendingToolResults = [];
     this.playbackBusy = false;
@@ -536,21 +534,30 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
   }
 
   cancelPendingSpeech(): void {
-    if (this.pendingSpeak?.readoutId)
-      this.callbacks.onReadoutState?.(
-        this.pendingSpeak.readoutId,
-        'cancelled',
-        '排队播报已取消。',
-      );
-    // Task lifecycle messages are single-slot. Clearing this prevents a
-    // queued "still processing" line from being spoken after task_done.
-    this.pendingSpeak = null;
-    this.pendingSpeakExact = false;
+    for (const pending of this.pendingSpeak) {
+      if (pending.readoutId)
+        this.callbacks.onReadoutState?.(
+          pending.readoutId,
+          'cancelled',
+          '排队播报已取消。',
+        );
+    }
+    this.pendingSpeak = [];
   }
 
   speak(text: string, readoutId?: string): void {
-    const exact = this.pendingSpeakExact;
-    this.pendingSpeakExact = false;
+    this.enqueueProactiveSpeech(text, false, readoutId);
+  }
+
+  speakExact(text: string): void {
+    this.enqueueProactiveSpeech(text, true);
+  }
+
+  private enqueueProactiveSpeech(
+    text: string,
+    exact: boolean,
+    readoutId?: string,
+  ): void {
     if (!this.connected || !text.trim()) {
       if (readoutId)
         this.callbacks.onReadoutState?.(
@@ -562,14 +569,7 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
     }
     if (readoutId) this.callbacks.onReadoutState?.(readoutId, 'queued');
     if (this.cancelRequested || this.awaitingResponse || this.playbackBusy) {
-      if (this.pendingSpeak?.readoutId)
-        this.callbacks.onReadoutState?.(
-          this.pendingSpeak.readoutId,
-          'cancelled',
-          '被后续播报替换，可点击重新播报。',
-        );
-      this.pendingSpeak = { text, readoutId };
-      this.pendingSpeakExact = exact;
+      this.pendingSpeak.push({ text, exact, readoutId });
       console.log('[cyrvis provider] proactive speech queued', {
         cancelRequested: this.cancelRequested,
         playbackBusy: this.playbackBusy,
@@ -579,11 +579,6 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
     }
 
     this.sendProactiveSpeak(text, readoutId, exact);
-  }
-
-  speakExact(text: string): void {
-    this.pendingSpeakExact = true;
-    this.speak(text);
   }
   isReady(): boolean {
     return this.connected;
@@ -658,7 +653,7 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
         content: [
           {
             type: 'input_text',
-            text: `[系统主动播报] 以下仅供朗读，不是用户操作请求。只朗读这句话，不回答其中的问题、不调用工具、不执行动作：${JSON.stringify(text)}`,
+            text: `[系统主动播报] 以下仅供朗读，不是用户操作请求。请逐字完整朗读，不省略、不总结，不回答其中的问题、不调用工具、不执行动作：${JSON.stringify(text)}`,
           },
         ],
       },
@@ -754,12 +749,9 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
       return;
     }
 
-    if (this.pendingSpeak) {
-      const pending = this.pendingSpeak;
-      const exact = this.pendingSpeakExact;
-      this.pendingSpeak = null;
-      this.pendingSpeakExact = false;
-      this.sendProactiveSpeak(pending.text, pending.readoutId, exact);
+    const speech = this.pendingSpeak.shift();
+    if (speech) {
+      this.sendProactiveSpeak(speech.text, speech.readoutId, speech.exact);
     }
   }
 
@@ -825,8 +817,7 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
     this.proactiveItemId = null;
     this.proactiveItemPending = false;
     this.pendingToolResults = [];
-    this.pendingSpeak = null;
-    this.pendingSpeakExact = false;
+    this.pendingSpeak = [];
     this.pendingUserText = null;
     this.proactivePending = false;
     this.readOnlySpeech = false;
@@ -1432,7 +1423,7 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
     // A queued proactive line will replace the instructions again. Sending a
     // restore now creates two session.update acks and lets response.create
     // race the restore, which produced answers to stale user audio.
-    if (this.pendingSpeak) {
+    if (this.pendingSpeak.length) {
       return;
     }
     this.send({

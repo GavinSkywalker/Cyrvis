@@ -4,15 +4,19 @@
  */
 
 import os from 'node:os';
+import path from 'node:path';
 
 import type { SystemStateStore } from '../system/system-state';
 import { createSystemStateTools } from '../system/tools';
 import { createReminderTools } from '../system/reminders';
 import {
   BrowserPerceptionProvider,
+  ClipboardPerceptionProvider,
   createBuiltinProviderBundle,
   createContextTools,
   DynamicContextStore,
+  FilePerceptionProvider,
+  UiFocusPerceptionProvider,
   type PerceptionProvider,
   type BuiltinProviderBundle,
 } from '../context';
@@ -41,6 +45,8 @@ import {
 import { ToolSurface } from './tool-surface';
 import { ToolUsageStore } from './tool-usage';
 import type { DesktopHost, ToolContext, ToolPermission } from './types';
+import { LocalWorkflowEngine } from './workflow-engine';
+import { createWorkflowTools } from './workflow-tools';
 
 export interface FastToolMatrix {
   context: ToolContext;
@@ -54,6 +60,7 @@ export interface FastToolMatrix {
   providerRegistry: ProviderRegistry;
   providerManager: ProviderManager;
   usage: ToolUsageStore;
+  workflow: LocalWorkflowEngine;
   dispose(): void;
 }
 
@@ -69,10 +76,21 @@ export interface FastToolMatrixOptions {
   deniedPermissions?: ToolPermission[];
   usageStateFile?: string;
   usageAuditFile?: string;
+  workflowStateFile?: string;
   builtinProviders?: BuiltinProviderBundle;
   perceptionProviders?: PerceptionProvider[];
   enableBrowserPerception?: boolean;
   browserPerceptionIntervalMs?: number;
+  enableFilePerception?: boolean;
+  filePerceptionRoots?: string[];
+  filePerceptionIntervalMs?: number;
+  timelineStateFile?: string;
+  enableClipboardPerception?: boolean;
+  clipboardPerceptionIntervalMs?: number;
+  includeClipboardContent?: boolean;
+  enableUiFocusPerception?: boolean;
+  uiFocusPerceptionIntervalMs?: number;
+  includeSelectedText?: boolean;
 }
 
 export const createFastToolContext = (
@@ -105,6 +123,9 @@ export const createFastToolMatrix = (
     auditFile: options.usageAuditFile,
   });
   const registry = new ToolRegistry(context, pathPolicy, usage);
+  const workflow = new LocalWorkflowEngine(registry, {
+    stateFile: options.workflowStateFile,
+  });
   const reminders = createReminderTools();
   registry.registerAll([
     ...FILESYSTEM_TOOLS,
@@ -117,6 +138,7 @@ export const createFastToolMatrix = (
     ...SYSTEM_CONTROL_TOOLS,
     ...OFFICE_TOOLS,
     ...reminders.tools,
+    ...createWorkflowTools(workflow),
     ...(systemState ? createSystemStateTools(systemState) : []),
   ]);
   const providerRegistry = new ProviderRegistry();
@@ -149,9 +171,8 @@ export const createFastToolMatrix = (
   const browserPerceptionEnabled =
     options.enableBrowserPerception ??
     Boolean(process.env.CYRVIS_BROWSER_DEBUG_URL);
-  const perceptionProviders =
-    options.perceptionProviders ??
-    (browserPerceptionEnabled
+  const perceptionProviders = options.perceptionProviders ?? [
+    ...(browserPerceptionEnabled
       ? [
           new BrowserPerceptionProvider({
             intervalMs:
@@ -161,7 +182,37 @@ export const createFastToolMatrix = (
                 : undefined,
           }),
         ]
-      : []);
+      : []),
+    ...(options.enableFilePerception
+      ? [
+          new FilePerceptionProvider({
+            roots: options.filePerceptionRoots || [
+              path.join(os.homedir(), 'Desktop'),
+              path.join(os.homedir(), 'Downloads'),
+              path.join(os.homedir(), 'Documents'),
+              cwd,
+            ],
+            intervalMs: options.filePerceptionIntervalMs,
+          }),
+        ]
+      : []),
+    ...(options.enableClipboardPerception
+      ? [
+          new ClipboardPerceptionProvider({
+            intervalMs: options.clipboardPerceptionIntervalMs,
+            includeContent: options.includeClipboardContent,
+          }),
+        ]
+      : []),
+    ...(options.enableUiFocusPerception
+      ? [
+          new UiFocusPerceptionProvider({
+            intervalMs: options.uiFocusPerceptionIntervalMs,
+            includeSelectedText: options.includeSelectedText,
+          }),
+        ]
+      : []),
+  ];
   const dynamicContext = new DynamicContextStore({
     registry,
     providers: providerRegistry,
@@ -172,11 +223,18 @@ export const createFastToolMatrix = (
     foregroundScriptPath: options.foregroundScriptPath,
     capabilities: () => capabilityCatalog.list(),
     perceptionProviders,
+    timelineStateFile: options.timelineStateFile,
   });
   capabilityCatalog.setRuntimeAvailabilityProvider((providerId) => {
+    const perceptionProviderId =
+      providerId === 'desktop.ui'
+        ? 'windows-ui-focus'
+        : providerId === 'clipboard'
+          ? 'clipboard'
+          : providerId;
     const status = dynamicContext
       .getPerceptionStatuses()
-      .find((provider) => provider.id === providerId);
+      .find((provider) => provider.id === perceptionProviderId);
     if (!status) {
       return null;
     }
@@ -249,8 +307,10 @@ export const createFastToolMatrix = (
     providerRegistry,
     providerManager,
     usage,
+    workflow,
     dispose: () => {
       void providerManager.stop();
+      workflow.dispose();
       surface.dispose();
       unsubscribeRegistry();
       unsubscribeProviders();

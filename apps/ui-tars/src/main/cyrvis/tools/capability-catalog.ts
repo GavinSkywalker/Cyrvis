@@ -15,6 +15,7 @@ import type {
   CapabilityAvailability,
   CapabilityDescriptor,
   CapabilityRequirements,
+  ToolExecutionContract,
   ToolDefinition,
   ToolExposureTier,
   ToolPermission,
@@ -179,6 +180,45 @@ const normalize = (value: string): string =>
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim();
 
+const inferExecutionContract = (
+  definition: ToolDefinition,
+): Required<ToolExecutionContract> => {
+  const mutation =
+    /(?:create|write|append|replace|copy|move|rename|delete|launch|close|control|focus|invoke|start)/i.test(
+      definition.name,
+    );
+  const readOnly =
+    /(?:list|read|inspect|snapshot|search|get_info|exists|hash)/i.test(
+      definition.name,
+    );
+  return {
+    sideEffect:
+      definition.contract?.sideEffect ||
+      (definition.risk === 'high'
+        ? 'irreversible'
+        : mutation
+          ? 'external'
+          : 'read'),
+    idempotent: definition.contract?.idempotent ?? readOnly,
+    retryable:
+      definition.contract?.retryable ??
+      (readOnly || (mutation && definition.risk === 'low')),
+    maxAttempts: definition.contract?.maxAttempts ?? (readOnly ? 2 : 1),
+    retryBackoffMs: definition.contract?.retryBackoffMs ?? 500,
+    timeoutMs:
+      definition.contract?.timeoutMs ??
+      (definition.domain === 'network'
+        ? 30_000
+        : definition.domain === 'office'
+          ? 120_000
+          : 20_000),
+    resumePolicy:
+      definition.contract?.resumePolicy ?? (readOnly ? 'restart' : 'manual'),
+    verification:
+      definition.contract?.verification ?? (mutation ? 'preferred' : 'none'),
+  };
+};
+
 export class CapabilityCatalog {
   private readonly deniedPermissions: ToolPermission[];
   private runtimeAvailabilityProvider:
@@ -324,6 +364,20 @@ export class CapabilityCatalog {
       schemaVersion: definition.capability?.schemaVersion || 1,
       permissions,
       requirements,
+      contract: inferExecutionContract(definition),
+      fallbackToolIds: (definition.capability?.fallbackToolIds || []).filter(
+        (toolId) => Boolean(this.registry.get(toolId)),
+      ),
+      costClass:
+        definition.capability?.costClass ||
+        (providerId === 'web' || providerId === 'office' ? 'medium' : 'free'),
+      latencyClass:
+        definition.capability?.latencyClass ||
+        (definition.domain === 'network'
+          ? 'slow'
+          : definition.domain === 'desktop'
+            ? 'fast'
+            : 'instant'),
       availability:
         state.availability === 'available' && degraded
           ? 'degraded'
@@ -335,7 +389,10 @@ export class CapabilityCatalog {
       usage: {
         successes: usage.successes,
         failures: usage.failures,
+        consecutiveFailures: usage.consecutiveFailures,
         lastUsedAt: usage.lastUsedAt,
+        averageDurationMs: usage.averageDurationMs,
+        timeouts: usage.timeouts,
       },
       inputSchema: definition.inputSchema,
     };

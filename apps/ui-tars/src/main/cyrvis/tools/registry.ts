@@ -5,7 +5,6 @@
 
 import os from 'node:os';
 
-import { SENSITIVE_CONFIRMATION_PROMPT } from './confirmation-policy';
 import { PathPolicy } from './path-policy';
 import { TOOL_API_VERSION } from './provider-types';
 import { ToolUsageStore, type ToolUsageRecord } from './tool-usage';
@@ -14,7 +13,9 @@ import type {
   PreparedToolCall,
   ToolContext,
   ToolDefinition,
+  ToolExecutionOptions,
   ToolResult,
+  ToolVerificationResult,
 } from './types';
 
 export interface ToolExecutionEvent {
@@ -186,7 +187,7 @@ export class ToolRegistry {
   async execute(
     tool: string,
     rawArgs: Record<string, unknown>,
-    options: { confirmed?: boolean } = {},
+    options: ToolExecutionOptions = {},
   ): Promise<ToolResult> {
     let prepared: PreparedToolCall;
     try {
@@ -217,37 +218,20 @@ export class ToolRegistry {
 
   async executePrepared(
     prepared: PreparedToolCall,
-    options: { confirmed?: boolean } = {},
+    options: ToolExecutionOptions = {},
   ): Promise<ToolResult> {
-    if (prepared.requiresConfirmation && options.confirmed !== true) {
-      const result: ToolResult = {
-        ok: false,
-        tool: prepared.tool,
-        speech: SENSITIVE_CONFIRMATION_PROMPT,
-        error: {
-          code: 'CONFIRMATION_REQUIRED',
-          message:
-            prepared.confirmationReason ||
-            'The operation requires confirmation.',
-        },
-      };
-      this.emitExecution({
-        toolId: prepared.tool,
-        ok: false,
-        speech: result.speech,
-        data: result.data,
-        error: result.error?.message,
-        timestamp: Date.now(),
-        durationMs: 0,
-      });
-      return result;
-    }
     const startedAt = Date.now();
     try {
-      const result = await prepared.definition.execute(
+      const executionContext = options.onProgress
+        ? { ...this.context, reportProgress: options.onProgress }
+        : this.context;
+      const executed = await prepared.definition.execute(
         prepared.args,
-        this.context,
+        executionContext,
       );
+      const result = executed.ok
+        ? await this.verifyExecution(prepared, executed)
+        : executed;
       this.usageStore.record({
         timestamp: Date.now(),
         toolId: prepared.tool,
@@ -303,6 +287,15 @@ export class ToolRegistry {
     return this.usageStore.get(toolId);
   }
 
+  async verify(
+    tool: string,
+    rawArgs: Record<string, unknown>,
+    result: ToolResult,
+  ): Promise<ToolResult> {
+    const prepared = await this.prepare(tool, rawArgs);
+    return this.verifyExecution(prepared, result);
+  }
+
   get usage(): ToolUsageStore {
     return this.usageStore;
   }
@@ -350,6 +343,74 @@ export class ToolRegistry {
         // Execution observers must not alter tool outcomes.
       }
     }
+  }
+
+  private async verifyExecution(
+    prepared: PreparedToolCall,
+    result: ToolResult,
+  ): Promise<ToolResult> {
+    const definition = prepared.definition;
+    let verification: ToolVerificationResult;
+    if (definition.verify) {
+      try {
+        verification = await definition.verify(
+          prepared.args,
+          result,
+          this.context,
+        );
+      } catch (error) {
+        verification = {
+          ok: false,
+          message: `结果验证异常：${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        };
+      }
+    } else if (definition.contract?.verification === 'required') {
+      verification = {
+        ok: false,
+        message: '工具声明必须验证结果，但没有提供验证器。',
+      };
+    } else {
+      return result;
+    }
+
+    const verificationData =
+      result.data &&
+      typeof result.data === 'object' &&
+      !Array.isArray(result.data)
+        ? { ...(result.data as Record<string, unknown>) }
+        : { result: result.data };
+    if (verification.ok) {
+      return {
+        ...result,
+        data: {
+          ...verificationData,
+          verification: {
+            ok: true,
+            message: verification.message,
+            data: verification.data,
+          },
+        },
+      };
+    }
+    return {
+      ...result,
+      ok: false,
+      speech: `操作已执行，但结果验证失败：${verification.message}`,
+      data: {
+        ...verificationData,
+        verification: {
+          ok: false,
+          message: verification.message,
+          data: verification.data,
+        },
+      },
+      error: {
+        code: 'TOOL_VERIFICATION_FAILED',
+        message: verification.message,
+      },
+    };
   }
 }
 

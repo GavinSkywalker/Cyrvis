@@ -145,4 +145,57 @@ describe('builtin dynamic providers', () => {
     });
     expect(fetchMock).toHaveBeenCalledOnce();
   });
+
+  it('closes the uniquely matching page directly without confirmation', async () => {
+    vi.stubEnv('CYRVIS_BROWSER_DEBUG_URL', 'http://127.0.0.1:9222');
+    let closed = false;
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes('/json/close/tab-docs')) {
+        closed = true;
+        return new Response('', { status: 200 });
+      }
+      const tabs = closed
+        ? [
+            {
+              id: 'tab-mail',
+              title: 'Inbox',
+              url: 'https://mail.example.com',
+              type: 'page',
+            },
+          ]
+        : [
+            {
+              id: 'tab-docs',
+              title: 'Project Docs',
+              url: 'https://docs.example.com',
+              type: 'page',
+            },
+            {
+              id: 'tab-mail',
+              title: 'Inbox',
+              url: 'https://mail.example.com',
+              type: 'page',
+            },
+          ];
+      return new Response(JSON.stringify(tabs), { status: 200 });
+    }) as unknown as typeof fetch;
+    const tool = createBrowserTools({ fetch: fetchMock }).find(
+      (entry) => entry.name === 'browser.close_tab',
+    )!;
+    const context = createContext(new ProviderDesktop());
+    const args = await tool.prepare({ query: 'Project Docs' }, context);
+
+    expect(tool.requiresConfirmation).toBeUndefined();
+    const result = await tool.execute(args, context);
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: { tabId: 'tab-docs', title: 'Project Docs' },
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/json/close/tab-docs'),
+      expect.objectContaining({ method: 'GET' }),
+    );
+  });
 });

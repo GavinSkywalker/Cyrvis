@@ -214,4 +214,59 @@ describe('SystemStateStore', () => {
     expect(appScans).toBeGreaterThanOrEqual(2);
     store.stop();
   });
+
+  it('applies near-real-time runtime observations without waiting for the timer', async () => {
+    const desktop = new FakeDesktopHost();
+    const store = new SystemStateStore(desktop, {
+      staleMs: 60_000,
+      discoverers: {
+        applications: async () => [],
+        steam: async () => ({ root: null, games: [] }),
+        disks: async () => [],
+        battery: async () => null,
+        services: async () => [],
+        recentFiles: async () => [],
+      },
+    });
+    await store.refresh(true);
+    const fullObservedAt = store.getSnapshot().fullObservedAt;
+    const observedAt = Date.now() + 1_000;
+    const listener = vi.fn();
+    store.onChange(listener);
+    store.applyRuntimeObservation({
+      observedAt,
+      foreground: {
+        pid: 20,
+        process: 'Code',
+        title: 'main.ts - Visual Studio Code',
+        handle: 200,
+        focused: true,
+      },
+      processes: [
+        {
+          pid: 20,
+          name: 'Code',
+          title: 'main.ts - Visual Studio Code',
+          memoryBytes: 100,
+        },
+      ],
+      windows: [
+        {
+          pid: 20,
+          process: 'Code',
+          title: 'main.ts - Visual Studio Code',
+          handle: 200,
+        },
+      ],
+    });
+
+    expect(store.getSnapshot()).toMatchObject({
+      capturedAt: observedAt,
+      runtimeObservedAt: observedAt,
+      fullObservedAt,
+      runningProcesses: [expect.objectContaining({ pid: 20 })],
+      windows: [expect.objectContaining({ focused: true })],
+    });
+    expect(listener).toHaveBeenCalledOnce();
+  });
 });

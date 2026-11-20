@@ -14,6 +14,9 @@ export interface ToolUsageRecord {
   consecutiveFailures: number;
   lastUsedAt: number | null;
   lastError: string | null;
+  lastDurationMs: number | null;
+  averageDurationMs: number | null;
+  timeouts: number;
 }
 
 export interface ToolUsageEvent {
@@ -23,6 +26,7 @@ export interface ToolUsageEvent {
   ok: boolean;
   durationMs: number;
   error?: string;
+  timedOut?: boolean;
 }
 
 interface UsageFile {
@@ -57,12 +61,21 @@ export class ToolUsageStore {
         consecutiveFailures: 0,
         lastUsedAt: null,
         lastError: null,
+        lastDurationMs: null,
+        averageDurationMs: null,
+        timeouts: 0,
       }
     );
   }
 
   record(event: ToolUsageEvent): void {
     const previous = this.get(event.toolId);
+    const completed = previous.successes + previous.failures;
+    const averageDurationMs =
+      previous.averageDurationMs === null
+        ? event.durationMs
+        : (previous.averageDurationMs * completed + event.durationMs) /
+          (completed + 1);
     const next: ToolUsageRecord = event.ok
       ? {
           ...previous,
@@ -71,6 +84,9 @@ export class ToolUsageStore {
           consecutiveFailures: 0,
           lastUsedAt: event.timestamp,
           lastError: null,
+          lastDurationMs: event.durationMs,
+          averageDurationMs,
+          timeouts: previous.timeouts + (event.timedOut ? 1 : 0),
         }
       : {
           ...previous,
@@ -79,6 +95,9 @@ export class ToolUsageStore {
           consecutiveFailures: previous.consecutiveFailures + 1,
           lastUsedAt: event.timestamp,
           lastError: event.error || '工具执行失败',
+          lastDurationMs: event.durationMs,
+          averageDurationMs,
+          timeouts: previous.timeouts + (event.timedOut ? 1 : 0),
         };
     this.records.set(event.toolId, next);
     this.persist(event);

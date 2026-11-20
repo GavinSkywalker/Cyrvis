@@ -93,13 +93,24 @@ export type VoiceToolCall =
       name: 'open_site';
       args: { site: string; query?: string; task_instruction?: string };
     }
+  | { name: 'close_webpage'; args: { query: string } }
+  | {
+      name: 'create_presentation';
+      args: {
+        path: string;
+        title: string;
+        content?: string;
+        sourcePath?: string;
+        pageCount?: number;
+        audience?: string;
+        templateId?: string;
+        mode?: 'general' | 'creative';
+        provider?: 'auto' | 'qwen-doc' | 'powerpoint' | 'remote-api';
+      };
+    }
   | {
       name: `cyrvis_${string}`;
       args: Record<string, unknown>;
-    }
-  | {
-      name: 'confirm_action';
-      args: { task_id: string; approved: boolean };
     }
   | {
       name: 'travel_update_plan';

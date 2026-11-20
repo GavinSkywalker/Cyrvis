@@ -1,6 +1,22 @@
+import {
+  AlertTriangle,
+  Clock3,
+  Headphones,
+  Loader2,
+  Mic,
+  MicOff,
+  Pause,
+  Square,
+  Volume2,
+} from 'lucide-react';
 import { useEffect, useRef, useState, type PointerEvent } from 'react';
 
-import { voiceErrorMessage, type CompanionSnapshot } from '@shared/companion';
+import {
+  COMPANION_TASK_EXIT_MS,
+  voiceErrorMessage,
+  type CompanionSnapshot,
+  type CompanionTask,
+} from '@shared/companion';
 import { ConversationBubble } from './ConversationBubble';
 import { CompanionArtwork } from './CompanionArtwork';
 
@@ -13,6 +29,29 @@ const stateCopy: Record<CompanionSnapshot['state'], { label: string }> = {
   sleeping: { label: 'Sleeping' },
 };
 
+const taskStatusLabel: Record<CompanionTask['status'], string> = {
+  queued: '排队中',
+  running: '执行中',
+  waiting_confirmation: '等待确认',
+  paused: '已暂停',
+  cancelling: '正在停止',
+};
+
+type DisplayTask = CompanionTask & { motion: 'enter' | 'exit' };
+
+const TaskStatusIcon = ({ task }: { task: CompanionTask }) => {
+  if (task.status === 'waiting_confirmation') {
+    return <AlertTriangle className="h-3.5 w-3.5" />;
+  }
+  if (task.status === 'paused') {
+    return <Pause className="h-3.5 w-3.5" />;
+  }
+  if (task.status === 'queued') {
+    return <Clock3 className="h-3.5 w-3.5" />;
+  }
+  return <Loader2 className="h-3.5 w-3.5 animate-spin" />;
+};
+
 export default function Companion() {
   const [snapshot, setSnapshot] = useState<CompanionSnapshot>({
     state: 'idle',
@@ -21,11 +60,65 @@ export default function Companion() {
   });
   const dragEndRef = useRef<Promise<boolean> | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [displayTasks, setDisplayTasks] = useState<DisplayTask[]>([]);
+  const displayTasksRef = useRef<DisplayTask[]>([]);
+  const taskExitTimersRef = useRef(
+    new Map<string, ReturnType<typeof setTimeout>>(),
+  );
 
   useEffect(() => {
     void window.electron.companion.getState().then(setSnapshot);
     return window.electron.companion.onState(setSnapshot);
   }, []);
+
+  useEffect(() => {
+    const incoming = snapshot.tasks;
+    if (!incoming) return;
+    const incomingIds = new Set(incoming.map((task) => task.id));
+    for (const [id, timer] of taskExitTimersRef.current) {
+      if (!incomingIds.has(id)) continue;
+      clearTimeout(timer);
+      taskExitTimersRef.current.delete(id);
+    }
+
+    const current = displayTasksRef.current;
+    const remaining = new Map(current.map((task) => [task.id, task]));
+    const next = incoming.map((task): DisplayTask => {
+      const previous = remaining.get(task.id);
+      remaining.delete(task.id);
+      return {
+        ...task,
+        motion:
+          previous?.motion === 'exit' ? 'enter' : previous?.motion || 'enter',
+      };
+    });
+
+    for (const task of remaining.values()) {
+      next.push({ ...task, motion: 'exit' });
+      if (taskExitTimersRef.current.has(task.id)) continue;
+      const timer = setTimeout(() => {
+        taskExitTimersRef.current.delete(task.id);
+        const visible = displayTasksRef.current.filter(
+          (candidate) => candidate.id !== task.id,
+        );
+        displayTasksRef.current = visible;
+        setDisplayTasks(visible);
+      }, COMPANION_TASK_EXIT_MS);
+      taskExitTimersRef.current.set(task.id, timer);
+    }
+
+    displayTasksRef.current = next;
+    setDisplayTasks(next);
+  }, [snapshot.tasks]);
+
+  useEffect(
+    () => () => {
+      for (const timer of taskExitTimersRef.current.values())
+        clearTimeout(timer);
+      taskExitTimersRef.current.clear();
+    },
+    [],
+  );
 
   const endDrag = () => {
     setDragging(false);
@@ -48,12 +141,64 @@ export default function Companion() {
   };
 
   const current = stateCopy[snapshot.state];
+  const tasks = displayTasks;
+  const taskStackExtracting =
+    tasks.length > 0 && tasks.every((task) => task.motion === 'exit');
+  const assistantActive =
+    snapshot.state === 'speaking' || snapshot.state === 'thinking';
   return (
     <main
       className="companion-root"
       data-conversation={snapshot.conversationVisible || undefined}
+      data-tasks={tasks.length || undefined}
       aria-label="CYRVIS desktop companion"
     >
+      {tasks.length > 0 && (
+        <section
+          className="companion-task-stack"
+          data-motion={taskStackExtracting ? 'extract' : 'open'}
+          aria-label="Active tasks"
+        >
+          <header>
+            <span>进行中的任务</span>
+            <span>{tasks.length}</span>
+          </header>
+          <ol aria-live="polite">
+            {tasks.slice(0, 5).map((task) => (
+              <li
+                key={task.id}
+                data-motion={task.motion}
+                data-status={task.status}
+              >
+                <span className="companion-task-status-icon">
+                  <TaskStatusIcon task={task} />
+                </span>
+                <div>
+                  <p>{task.title}</p>
+                  <small>{task.message || taskStatusLabel[task.status]}</small>
+                  {task.progress?.percent !== null &&
+                  task.progress?.percent !== undefined ? (
+                    <small className="companion-task-percent">
+                      {task.progress.percent}%
+                    </small>
+                  ) : null}
+                </div>
+                <span className="companion-task-state">
+                  {taskStatusLabel[task.status]}
+                </span>
+                {task.status === 'running' && task.progress ? (
+                  <progress
+                    className="companion-task-progress"
+                    max={100}
+                    value={task.progress.percent ?? undefined}
+                    aria-label={`${task.title}: ${task.progress.percent === null ? 'processing' : `${task.progress.percent}%`}`}
+                  />
+                ) : null}
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
       <ConversationBubble snapshot={snapshot} />
       <div className="companion-robot">
         <button
@@ -93,21 +238,34 @@ export default function Companion() {
         <div className="companion-controls" aria-label="Voice controls">
           <button
             type="button"
+            className="companion-control-button"
             disabled={snapshot.connecting}
+            aria-label={
+              snapshot.micReady ? 'Pause conversation' : 'Start conversation'
+            }
+            title={
+              snapshot.micReady ? 'Pause conversation' : 'Start conversation'
+            }
             onClick={() =>
               void window.electron.companion.command(
                 snapshot.micReady ? 'stop' : 'start',
               )
             }
           >
-            {snapshot.connecting
-              ? 'Connecting…'
-              : snapshot.micReady
-                ? 'Pause conversation'
-                : 'Start conversation'}
+            {snapshot.connecting ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : snapshot.micReady ? (
+              <Mic className="h-4 w-4" />
+            ) : (
+              <MicOff className="h-4 w-4" />
+            )}
           </button>
           <button
             type="button"
+            className="companion-control-button"
+            aria-label={
+              snapshot.audioMode === 'speaker' ? 'Use headset' : 'Use speakers'
+            }
             title={
               snapshot.audioMode === 'speaker'
                 ? 'Switch to headset mode'
@@ -115,18 +273,24 @@ export default function Companion() {
             }
             onClick={() => void window.electron.companion.command('audio-mode')}
           >
-            {snapshot.audioMode === 'speaker' ? 'Use headset' : 'Use speakers'}
+            {snapshot.audioMode === 'speaker' ? (
+              <Headphones className="h-4 w-4" />
+            ) : (
+              <Volume2 className="h-4 w-4" />
+            )}
           </button>
-          {(snapshot.state === 'speaking' || snapshot.state === 'thinking') && (
-            <button
-              type="button"
-              onClick={() =>
-                void window.electron.companion.command('interrupt')
-              }
-            >
-              Interrupt
-            </button>
-          )}
+          <button
+            type="button"
+            className="companion-control-button"
+            disabled={!assistantActive}
+            aria-label="Interrupt response"
+            title={
+              assistantActive ? 'Interrupt response' : 'Nothing to interrupt'
+            }
+            onClick={() => void window.electron.companion.command('interrupt')}
+          >
+            <Square className="h-4 w-4" />
+          </button>
         </div>
       </div>
     </main>

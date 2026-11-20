@@ -21,6 +21,7 @@ vi.mock('react-router', async (original) => {
 vi.mock('@renderer/components/CyrvisVoice/VoiceRuntime', () => ({
   VoiceRuntime: () => null,
 }));
+vi.mock('@renderer/components/CyrvisRuntime', () => ({ default: () => null }));
 vi.mock('@/renderer/src/components/SideBar/app-sidebar', () => ({
   AppSidebar: () => null,
 }));

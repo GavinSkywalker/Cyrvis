@@ -113,6 +113,87 @@ const exists = async (target: string): Promise<boolean> => {
   }
 };
 
+const backupBeforeOverwrite = async (
+  target: string,
+): Promise<string | null> => {
+  if (!(await exists(target))) return null;
+  const extension = path.extname(target);
+  const stem = path.basename(target, extension);
+  const stamp = new Date().toISOString().replace(/[-:.TZ]/g, '');
+  const backup = path.join(
+    path.dirname(target),
+    `${stem}.cyrvis-backup-${stamp}${extension}`,
+  );
+  await fs.copyFile(target, backup);
+  return backup;
+};
+
+const verifyExists = async (
+  target: string,
+): Promise<{ ok: boolean; message: string }> => {
+  const present = await exists(target);
+  return {
+    ok: present,
+    message: present ? `已验证目标存在：${target}` : `目标未出现：${target}`,
+  };
+};
+
+const verifyMissing = async (
+  target: string,
+): Promise<{ ok: boolean; message: string }> => {
+  const present = await exists(target);
+  return {
+    ok: !present,
+    message: !present
+      ? `已验证目标不存在：${target}`
+      : `目标仍然存在：${target}`,
+  };
+};
+
+const verifyContentHash = async (
+  target: string,
+  expectedHash: string,
+): Promise<{ ok: boolean; message: string }> => {
+  try {
+    const content = await fs.readFile(target, 'utf8');
+    const actualHash = createHash('sha256').update(content).digest('hex');
+    return {
+      ok: actualHash === expectedHash,
+      message:
+        actualHash === expectedHash
+          ? '已验证文件内容与预期一致。'
+          : '文件内容与预期不一致。',
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+};
+
+const splitTextLines = (content: string) => {
+  const finalNewline = /(?:\r\n|\n|\r)$/.test(content);
+  const lines = content.split(/\r\n|\n|\r/);
+  if (finalNewline) {
+    lines.pop();
+  }
+  const newline = content.includes('\r\n')
+    ? '\r\n'
+    : content.includes('\n')
+      ? '\n'
+      : content.includes('\r')
+        ? '\r'
+        : '\n';
+  return { lines, finalNewline, newline };
+};
+
+const joinTextLines = (
+  lines: string[],
+  finalNewline: boolean,
+  newline: string,
+) => `${lines.join(newline)}${finalNewline && lines.length ? newline : ''}`;
+
 const statKind = (value: Awaited<ReturnType<typeof fs.stat>>): string =>
   value.isDirectory()
     ? 'directory'
@@ -504,6 +585,12 @@ export const FILESYSTEM_TOOLS: ToolDefinition[] = [
     domain: 'filesystem',
     description: 'Create a text file without overwriting an existing file.',
     risk: 'low',
+    contract: {
+      sideEffect: 'write',
+      idempotent: false,
+      retryable: false,
+      verification: 'required',
+    },
     inputSchema: {
       type: 'object',
       properties: {
@@ -515,37 +602,70 @@ export const FILESYSTEM_TOOLS: ToolDefinition[] = [
       additionalProperties: false,
     },
     pathArgs: (args) => [String(args.path)],
-    requiresConfirmation: async (args) =>
-      args.overwrite && (await exists(String(args.path)))
-        ? '文件已经存在，覆盖会丢失原内容。'
-        : null,
+    requiresConfirmation: async (args) => {
+      if (!args.overwrite || !(await exists(String(args.path)))) return null;
+      const current = await fs
+        .readFile(String(args.path), 'utf8')
+        .catch(() => null);
+      return current === String(args.content)
+        ? null
+        : '文件已经存在，覆盖会丢失原内容。';
+    },
     prepare: (input, context) => ({
       path: context.resolvePath(asString(input, 'path', { required: true })),
       content: asString(input, 'content'),
       overwrite: asBoolean(input, 'overwrite'),
     }),
     async execute(args) {
-      await fs.mkdir(path.dirname(String(args.path)), { recursive: true });
+      const target = String(args.path);
+      const content = String(args.content);
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      if (args.overwrite && (await exists(target))) {
+        const current = await fs.readFile(target, 'utf8').catch(() => null);
+        if (current === content) {
+          return success(
+            'fs.create_file',
+            `文件内容未变化：${path.basename(target)}。`,
+            {
+              path: target,
+              bytes: Buffer.byteLength(content),
+              unchanged: true,
+            },
+          );
+        }
+      }
+      const backupPath =
+        args.overwrite && (await exists(target))
+          ? await backupBeforeOverwrite(target)
+          : null;
       await fs.writeFile(
-        String(args.path),
-        String(args.content),
+        target,
+        content,
         args.overwrite ? 'utf8' : { encoding: 'utf8', flag: 'wx' },
       );
       return success(
         'fs.create_file',
-        `已创建文件 ${path.basename(String(args.path))}。`,
+        `已创建文件 ${path.basename(target)}。`,
         {
-          path: String(args.path),
-          bytes: Buffer.byteLength(String(args.content)),
+          path: target,
+          bytes: Buffer.byteLength(content),
+          ...(backupPath ? { backupPath } : {}),
         },
       );
     },
+    verify: (args) => verifyExists(String(args.path)),
   },
   {
     name: 'fs.write_file',
     domain: 'filesystem',
     description: 'Write complete text content to a file.',
     risk: 'medium',
+    contract: {
+      sideEffect: 'write',
+      idempotent: false,
+      retryable: false,
+      verification: 'required',
+    },
     inputSchema: {
       type: 'object',
       properties: {
@@ -556,32 +676,58 @@ export const FILESYSTEM_TOOLS: ToolDefinition[] = [
       additionalProperties: false,
     },
     pathArgs: (args) => [String(args.path)],
-    requiresConfirmation: async (args) =>
-      (await exists(String(args.path)))
-        ? '目标文件已存在，写入会替换原内容。'
-        : null,
+    requiresConfirmation: async (args) => {
+      if (!(await exists(String(args.path)))) return null;
+      const current = await fs
+        .readFile(String(args.path), 'utf8')
+        .catch(() => null);
+      return current === String(args.content)
+        ? null
+        : '目标文件已存在，写入会替换原内容。';
+    },
     prepare: (input, context) => ({
       path: context.resolvePath(asString(input, 'path', { required: true })),
       content: asString(input, 'content', { required: true }),
     }),
     async execute(args) {
-      await fs.mkdir(path.dirname(String(args.path)), { recursive: true });
-      await fs.writeFile(String(args.path), String(args.content), 'utf8');
-      return success(
-        'fs.write_file',
-        `已写入文件 ${path.basename(String(args.path))}。`,
-        {
-          path: String(args.path),
-          bytes: Buffer.byteLength(String(args.content)),
-        },
-      );
+      const target = String(args.path);
+      const content = String(args.content);
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      if (await exists(target)) {
+        const current = await fs.readFile(target, 'utf8').catch(() => null);
+        if (current === content) {
+          return success(
+            'fs.write_file',
+            `文件内容未变化：${path.basename(target)}。`,
+            {
+              path: target,
+              bytes: Buffer.byteLength(content),
+              unchanged: true,
+            },
+          );
+        }
+      }
+      const backupPath = await backupBeforeOverwrite(target);
+      await fs.writeFile(target, content, 'utf8');
+      return success('fs.write_file', `已写入文件 ${path.basename(target)}。`, {
+        path: target,
+        bytes: Buffer.byteLength(content),
+        ...(backupPath ? { backupPath } : {}),
+      });
     },
+    verify: (args) => verifyExists(String(args.path)),
   },
   {
     name: 'fs.append_file',
     domain: 'filesystem',
     description: 'Append text to a file.',
     risk: 'medium',
+    contract: {
+      sideEffect: 'write',
+      idempotent: false,
+      retryable: false,
+      verification: 'required',
+    },
     inputSchema: {
       type: 'object',
       properties: {
@@ -608,12 +754,19 @@ export const FILESYSTEM_TOOLS: ToolDefinition[] = [
         },
       );
     },
+    verify: (args) => verifyExists(String(args.path)),
   },
   {
     name: 'fs.replace_text',
     domain: 'filesystem',
     description: 'Replace exact text in a UTF-8 file.',
     risk: 'medium',
+    contract: {
+      sideEffect: 'write',
+      idempotent: false,
+      retryable: false,
+      verification: 'required',
+    },
     inputSchema: {
       type: 'object',
       properties: {
@@ -652,12 +805,179 @@ export const FILESYSTEM_TOOLS: ToolDefinition[] = [
         { path: String(args.path) },
       );
     },
+    verify: (args) => verifyExists(String(args.path)),
+  },
+  {
+    name: 'fs.delete_lines',
+    domain: 'filesystem',
+    description:
+      'Delete complete lines from a UTF-8 text file without asking for confirmation. Select lines by 1-based line number(s), a range, or matching text. A backup is created before writing.',
+    risk: 'medium',
+    contract: {
+      sideEffect: 'write',
+      idempotent: false,
+      retryable: false,
+      verification: 'required',
+    },
+    capability: {
+      providerId: 'filesystem',
+      tier: 2,
+      activation: 'on-demand',
+      priority: 82,
+      tags: [
+        'file',
+        'text',
+        'line',
+        'delete',
+        'remove',
+        '文件',
+        '文本',
+        '行',
+        '删除',
+      ],
+      permissions: ['filesystem.write'],
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        line: { type: 'number', minimum: 1 },
+        lineNumbers: {
+          type: 'array',
+          items: { type: 'number', minimum: 1 },
+        },
+        startLine: { type: 'number', minimum: 1 },
+        endLine: { type: 'number', minimum: 1 },
+        match: { type: 'string' },
+        all: { type: 'boolean' },
+        caseSensitive: { type: 'boolean' },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
+    pathArgs: (args) => [String(args.path)],
+    prepare: (input, context) => {
+      const lineNumbers = [
+        ...(typeof input.line === 'number' ? [input.line] : []),
+        ...(Array.isArray(input.lineNumbers)
+          ? input.lineNumbers.filter(
+              (value): value is number =>
+                typeof value === 'number' &&
+                Number.isInteger(value) &&
+                value >= 1,
+            )
+          : []),
+      ];
+      const startLine =
+        typeof input.startLine === 'number' && input.startLine >= 1
+          ? Math.floor(input.startLine)
+          : null;
+      const endLine =
+        typeof input.endLine === 'number' && input.endLine >= 1
+          ? Math.floor(input.endLine)
+          : null;
+      if (startLine !== null && endLine !== null) {
+        for (
+          let line = Math.min(startLine, endLine);
+          line <= Math.max(startLine, endLine);
+          line += 1
+        ) {
+          lineNumbers.push(line);
+        }
+      } else if (startLine !== null) {
+        lineNumbers.push(startLine);
+      } else if (endLine !== null) {
+        lineNumbers.push(endLine);
+      }
+      const match = asString(input, 'match').trim();
+      if (!lineNumbers.length && !match) {
+        throw new Error(
+          'line, lineNumbers, startLine/endLine, or match required',
+        );
+      }
+      return {
+        path: context.resolvePath(asString(input, 'path', { required: true })),
+        lineNumbers: [...new Set(lineNumbers)].sort(
+          (left, right) => left - right,
+        ),
+        match,
+        all: asBoolean(input, 'all'),
+        caseSensitive: asBoolean(input, 'caseSensitive'),
+      };
+    },
+    async execute(args) {
+      const target = String(args.path);
+      const content = await fs.readFile(target, 'utf8');
+      const { lines, finalNewline, newline } = splitTextLines(content);
+      const selected = new Set<number>();
+      for (const lineNumber of args.lineNumbers as number[]) {
+        if (lineNumber <= lines.length) {
+          selected.add(lineNumber - 1);
+        }
+      }
+      const match = String(args.match || '');
+      if (match) {
+        const needle = args.caseSensitive ? match : match.toLowerCase();
+        for (let index = 0; index < lines.length; index += 1) {
+          const candidate = args.caseSensitive
+            ? lines[index]
+            : lines[index].toLowerCase();
+          if (candidate.includes(needle)) {
+            selected.add(index);
+            if (!args.all) break;
+          }
+        }
+      }
+      if (!selected.size) {
+        return failure(
+          'fs.delete_lines',
+          '没有找到符合条件的文本行，文件未修改。',
+          'LINE_NOT_FOUND',
+        );
+      }
+      const removedLines = [...selected]
+        .sort((left, right) => left - right)
+        .map((index) => ({
+          line: index + 1,
+          text: lines[index],
+        }));
+      const remaining = lines.filter((_, index) => !selected.has(index));
+      const next = joinTextLines(remaining, finalNewline, newline);
+      const backupPath = await backupBeforeOverwrite(target);
+      await fs.writeFile(target, next, 'utf8');
+      const contentHash = createHash('sha256').update(next).digest('hex');
+      return success(
+        'fs.delete_lines',
+        `已从 ${path.basename(target)} 删除 ${removedLines.length} 行。`,
+        {
+          path: target,
+          removedCount: removedLines.length,
+          removedLines,
+          remainingLineCount: remaining.length,
+          contentHash,
+          ...(backupPath ? { backupPath } : {}),
+        },
+      );
+    },
+    verify: (args, result) => {
+      const data = result.data as { contentHash?: unknown } | undefined;
+      return typeof data?.contentHash === 'string'
+        ? verifyContentHash(String(args.path), data.contentHash)
+        : verifyExists(String(args.path));
+    },
   },
   {
     name: 'fs.create_directory',
     domain: 'filesystem',
     description: 'Create a directory and any missing parents.',
     risk: 'low',
+    contract: {
+      sideEffect: 'write',
+      idempotent: true,
+      retryable: true,
+      maxAttempts: 2,
+      verification: 'required',
+    },
     inputSchema: {
       type: 'object',
       properties: { path: { type: 'string' } },
@@ -676,12 +996,19 @@ export const FILESYSTEM_TOOLS: ToolDefinition[] = [
         { path: String(args.path) },
       );
     },
+    verify: (args) => verifyExists(String(args.path)),
   },
   {
     name: 'fs.copy',
     domain: 'filesystem',
     description: 'Copy a file or directory.',
     risk: 'medium',
+    contract: {
+      sideEffect: 'write',
+      idempotent: false,
+      retryable: false,
+      verification: 'required',
+    },
     inputSchema: {
       type: 'object',
       properties: {
@@ -721,12 +1048,19 @@ export const FILESYSTEM_TOOLS: ToolDefinition[] = [
         { source: String(args.source), destination: String(args.destination) },
       );
     },
+    verify: (args) => verifyExists(String(args.destination)),
   },
   {
     name: 'fs.move',
     domain: 'filesystem',
     description: 'Move a file or directory to another path.',
     risk: 'medium',
+    contract: {
+      sideEffect: 'write',
+      idempotent: false,
+      retryable: false,
+      verification: 'required',
+    },
     inputSchema: {
       type: 'object',
       properties: {
@@ -776,12 +1110,26 @@ export const FILESYSTEM_TOOLS: ToolDefinition[] = [
         { source: String(args.source), destination: String(args.destination) },
       );
     },
+    async verify(args) {
+      const destination = await verifyExists(String(args.destination));
+      const source = await verifyMissing(String(args.source));
+      return {
+        ok: destination.ok && source.ok,
+        message: `${destination.message}；${source.message}`,
+      };
+    },
   },
   {
     name: 'fs.rename',
     domain: 'filesystem',
     description: 'Rename a file or directory in place.',
     risk: 'medium',
+    contract: {
+      sideEffect: 'write',
+      idempotent: false,
+      retryable: false,
+      verification: 'required',
+    },
     inputSchema: {
       type: 'object',
       properties: {
@@ -817,13 +1165,20 @@ export const FILESYSTEM_TOOLS: ToolDefinition[] = [
         destination: String(args.destination),
       });
     },
+    verify: (args) => verifyExists(String(args.destination)),
   },
   {
     name: 'fs.delete_to_trash',
     domain: 'filesystem',
     description:
-      'Move a file or directory to the recycle bin. This is always confirmed.',
+      'Move a file or directory to the recycle bin. Execute directly when the user explicitly requests deletion.',
     risk: 'high',
+    contract: {
+      sideEffect: 'irreversible',
+      idempotent: false,
+      retryable: false,
+      verification: 'required',
+    },
     inputSchema: {
       type: 'object',
       properties: { path: { type: 'string' } },
@@ -894,6 +1249,7 @@ export const FILESYSTEM_TOOLS: ToolDefinition[] = [
         },
       );
     },
+    verify: (args) => verifyMissing(String(args.path)),
   },
   {
     name: 'fs.search',

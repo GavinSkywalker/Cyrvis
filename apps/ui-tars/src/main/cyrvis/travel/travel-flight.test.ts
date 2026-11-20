@@ -6,7 +6,9 @@ import { describe, expect, it } from 'vitest';
 
 import {
   compareFlights,
+  compareLiveFlights,
   formatFlightComparison,
+  formatLiveFlightComparison,
   isTravelFlightIntent,
   parseTravelDate,
   parseTravelDestination,
@@ -19,6 +21,12 @@ describe('travel flight slots', () => {
     expect(parseTravelDestination('我要买一张去三亚的机票')).toBe('三亚');
     expect(parseTravelDestination('帮我订张机票去三亚')).toBe('三亚');
     expect(parseTravelDestination('三亚机票怎么买')).toBe('三亚');
+    expect(parseTravelDestination('我要买一张从北京去三亚的单程机票')).toBe(
+      '三亚',
+    );
+    expect(parseTravelDestination('我要买一张从北京去三亚的往返机票')).toBe(
+      '三亚',
+    );
     expect(parseTravelDestination('就厦门吧', true)).toBe('厦门');
     expect(parseTravelOrigin('从北京出发')).toBe('北京');
     expect(parseTravelOrigin('北京', true)).toBe('北京');
@@ -81,5 +89,56 @@ describe('flight comparison', () => {
     expect(comparison.returnDate).toBeNull();
     expect(speech).toContain('单程');
     expect(speech).not.toContain('往返');
+  });
+
+  it('speaks live Google Flights results without claiming five OTAs', () => {
+    const searchUrl = 'https://www.google.com/travel/flights?q=BJS-SYX';
+    const comparison = compareLiveFlights(
+      input,
+      [
+        {
+          id: 'ZH-2340',
+          providerId: 'ZH',
+          provider: '深航',
+          title: '深航 BJS → SYX',
+          totalPrice: 2340,
+          currency: 'CNY',
+          url: searchUrl,
+          conditions: {
+            direct: false,
+            transferCount: 1,
+            baggageKg: 0,
+            refundable: false,
+            departureTime: '21:15',
+          },
+          departTime: '21:15',
+        },
+        {
+          id: 'CZ-4230',
+          providerId: 'CZ',
+          provider: '南航',
+          title: '南航 BJS → SYX',
+          totalPrice: 4230,
+          currency: 'CNY',
+          url: searchUrl,
+          conditions: {
+            direct: true,
+            transferCount: 0,
+            baggageKg: 0,
+            refundable: false,
+            departureTime: '07:25',
+          },
+          departTime: '07:25',
+        },
+      ],
+      searchUrl,
+    );
+    const speech = formatLiveFlightComparison(comparison);
+
+    expect(comparison.source).toBe('google_flights');
+    expect(speech).toContain('Google Flights 的实时结果');
+    expect(speech).toContain('深航');
+    expect(speech).toContain('价格会实时变化');
+    expect(speech).not.toContain('5 个平台');
   });
 });

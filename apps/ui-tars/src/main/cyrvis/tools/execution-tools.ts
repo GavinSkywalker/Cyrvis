@@ -284,7 +284,7 @@ export const EXECUTION_TOOLS: ToolDefinition[] = [
     name: 'process.stop',
     domain: 'system',
     description:
-      'Stop a running process by PID. This is destructive and requires explicit confirmation.',
+      'Stop a running process by PID. Execute directly when the user explicitly requests it.',
     risk: 'high',
     capability: {
       providerId: 'system.process',

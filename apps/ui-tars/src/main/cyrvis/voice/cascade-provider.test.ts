@@ -70,10 +70,36 @@ type ProviderInternals = {
   asrSessionId: string;
   asrSendChain: Promise<void>;
   lastPartialText: string;
+  connected: boolean;
+  responseActive: boolean;
   runConversationTurn(text: string, generation: number): Promise<void>;
 };
 
 describe('CascadeVoiceProvider turn ownership', () => {
+  it('retains screenshot IDs through the task speech queue and reports queued cancellation', () => {
+    const onResponseStarted = vi.fn();
+    const onReadoutState = vi.fn();
+    const provider = new CascadeVoiceProvider({
+      onResponseStarted,
+      onReadoutState,
+    });
+    (provider as unknown as ProviderInternals).connected = true;
+    provider.speak('当前任务进度。');
+    provider.speak('第一张封面。', 'shot-a');
+    provider.speak('第二张封面。', 'shot-b');
+    provider.notifyPlaybackIdle();
+    expect(onResponseStarted).toHaveBeenLastCalledWith({ readoutId: 'shot-a' });
+    provider.cancelPendingSpeech();
+    expect(onReadoutState).toHaveBeenCalledWith(
+      'shot-b',
+      'cancelled',
+      expect.any(String),
+    );
+    provider.notifyPlaybackIdle();
+    expect(onResponseStarted).toHaveBeenCalledTimes(2);
+    provider.close();
+  });
+
   it('routes a confirmed text request through the normal conversation pipeline', async () => {
     const provider = new CascadeVoiceProvider({});
     const internals = provider as unknown as ProviderInternals;
@@ -121,6 +147,66 @@ describe('CascadeVoiceProvider turn ownership', () => {
     await internals.runConversationTurn('confirm execution', 1);
 
     expect(ask).not.toHaveBeenCalled();
+    provider.close();
+  });
+
+  it('queues proactive task speech until the current playback is idle', () => {
+    const onAssistantText = vi.fn();
+    const onSpeechText = vi.fn();
+    const onResponseStarted = vi.fn();
+    const provider = new CascadeVoiceProvider({
+      onAssistantText,
+      onSpeechText,
+      onResponseStarted,
+    });
+    (provider as unknown as ProviderInternals).connected = true;
+
+    provider.speak('任务已开始。');
+    provider.speak('任务已经完成。');
+    provider.speak('任务结果已校验。');
+
+    expect(onResponseStarted).toHaveBeenCalledTimes(1);
+    expect(onSpeechText).toHaveBeenCalledTimes(1);
+    expect(onAssistantText).toHaveBeenCalledTimes(1);
+
+    provider.notifyPlaybackIdle();
+
+    expect(onResponseStarted).toHaveBeenCalledTimes(2);
+    expect(onSpeechText).toHaveBeenLastCalledWith('任务已经完成。', true);
+    provider.notifyPlaybackIdle();
+    expect(onSpeechText).toHaveBeenLastCalledWith('任务结果已校验。', true);
+    provider.close();
+  });
+
+  it('drops queued task speech when the task terminal event supersedes it', () => {
+    const onSpeechText = vi.fn();
+    const provider = new CascadeVoiceProvider({ onSpeechText });
+    (provider as unknown as ProviderInternals).connected = true;
+
+    provider.speak('任务仍在处理。');
+    provider.speak('任务已经完成。');
+    provider.cancelPendingSpeech();
+    provider.notifyPlaybackIdle();
+
+    expect(onSpeechText).toHaveBeenCalledTimes(1);
+    expect(onSpeechText).not.toHaveBeenCalledWith('任务已经完成。', true);
+    provider.close();
+  });
+
+  it('keeps task speech queued across an in-flight response and audio drain', () => {
+    const onSpeechText = vi.fn();
+    const provider = new CascadeVoiceProvider({ onSpeechText });
+    const internals = provider as unknown as ProviderInternals;
+    internals.connected = true;
+    internals.responseActive = true;
+
+    provider.speak('任务已开始。');
+    provider.notifyPlaybackIdle();
+    expect(onSpeechText).not.toHaveBeenCalled();
+
+    internals.responseActive = false;
+    provider.notifyPlaybackIdle();
+    expect(onSpeechText).toHaveBeenCalledWith('任务已开始。', true);
     provider.close();
   });
 });

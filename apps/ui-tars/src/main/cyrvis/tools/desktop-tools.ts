@@ -246,6 +246,41 @@ export const DESKTOP_TOOLS: ToolDefinition[] = [
     },
   },
   {
+    name: 'browser.close_page',
+    domain: 'network',
+    description:
+      'Close a specific Chrome, Edge, or Chromium browser page by matching its visible tab title. Does not require a DevTools endpoint.',
+    risk: 'medium',
+    capability: {
+      providerId: 'desktop.browser',
+      tier: 2,
+      activation: 'state',
+      priority: 74,
+      permissions: ['desktop.window'],
+      tags: ['browser', 'tab', 'close', '网页', '浏览器', '标签页', '关闭'],
+    },
+    inputSchema: {
+      type: 'object',
+      properties: { query: { type: 'string' } },
+      required: ['query'],
+      additionalProperties: false,
+    },
+    prepare: (input) => ({
+      query: text(input, 'query', { required: true }),
+    }),
+    async execute(args, context) {
+      if (!context.desktop.closeBrowserPage) {
+        throw new Error('当前系统不支持直接关闭指定网页');
+      }
+      const closed = await context.desktop.closeBrowserPage(String(args.query));
+      return success(
+        'browser.close_page',
+        `已关闭网页「${closed.title}」。`,
+        closed,
+      );
+    },
+  },
+  {
     name: 'window.list',
     domain: 'desktop',
     description:

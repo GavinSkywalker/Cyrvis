@@ -7,7 +7,7 @@ import { app, BrowserWindow } from 'electron';
 import { logger } from '@main/logger';
 
 import { createWindow } from './createWindow';
-import { hideCompanionWindow, showCompanionWindow } from './companionWindow';
+import { showCompanionWindow } from './companionWindow';
 
 let mainWindow: BrowserWindow | null = null;
 let isQuitting = false;
@@ -92,7 +92,6 @@ export async function hideMainWindow() {
 
 export async function showMainWindow() {
   try {
-    hideCompanionWindow();
     if (!mainWindow || mainWindow.isDestroyed()) {
       mainWindow = createMainWindow();
     }

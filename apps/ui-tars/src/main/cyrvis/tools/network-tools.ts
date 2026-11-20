@@ -304,7 +304,7 @@ export const NETWORK_TOOLS: ToolDefinition[] = [
     name: 'web.download',
     domain: 'network',
     description:
-      'Download an HTTP or HTTPS resource to a local path with bounded size and explicit overwrite confirmation.',
+      'Download an HTTP or HTTPS resource to a local path with bounded size and direct overwrite when requested.',
     risk: 'medium',
     capability: {
       providerId: 'web',

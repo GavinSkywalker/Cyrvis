@@ -17,6 +17,7 @@ import type { ControllerEvent } from '../types';
 import { BindingResolver } from './binding-resolver';
 import { ContextEventBus } from './event-bus';
 import { ForegroundMonitor } from './foreground-monitor';
+import { IntentFusionStore } from './intent-fusion';
 import {
   IncrementalResourceStore,
   PerceptionScheduler,
@@ -165,6 +166,7 @@ const resourceSignature = (
 export class DynamicContextStore {
   readonly user: UserContextStore;
   readonly resources: ResourceCatalog;
+  readonly intent: IntentFusionStore;
   readonly events = new ContextEventBus();
   private readonly bindings = new BindingResolver();
   private readonly relevance = new RelevanceEngine();
@@ -190,6 +192,10 @@ export class DynamicContextStore {
   constructor(private readonly options: DynamicContextStoreOptions) {
     this.user = new UserContextStore(options);
     this.resources = new ResourceCatalog(options.providers);
+    this.intent = new IntentFusionStore({
+      now: options.now,
+      timelineStateFile: options.timelineStateFile,
+    });
     this.runtimeResourceTtlMs = options.actionTtlMs ?? 10 * 60_000;
     this.perception = new PerceptionScheduler({
       providers: options.perceptionProviders || [],
@@ -198,6 +204,7 @@ export class DynamicContextStore {
         now: Date.now(),
         system: this.options.systemState?.getSnapshot() || null,
         user: this.user.getSnapshot(),
+        desktop: this.options.desktop,
       }),
       minIntervalMs: options.perceptionMinIntervalMs,
       maxBackoffMs: options.perceptionMaxBackoffMs,
@@ -210,7 +217,10 @@ export class DynamicContextStore {
         ? new WindowsForegroundEventSource({
             desktop: options.desktop,
             scriptPath: options.foregroundScriptPath,
-            onChange: (window) => this.user.setActiveWindow(window),
+            onChange: (window) => {
+              this.options.systemState?.observeForeground(window);
+              this.user.setActiveWindow(window);
+            },
             onError: (error) => {
               console.warn('[cyrvis context] foreground event source', {
                 error: error.message,
@@ -232,6 +242,7 @@ export class DynamicContextStore {
           ? Math.max(10_000, this.options.foregroundRefreshMs || 10_000)
           : this.options.foregroundRefreshMs,
         onChange: (window) => {
+          this.options.systemState?.observeForeground(window);
           this.user.setActiveWindow(window);
         },
       });
@@ -363,7 +374,12 @@ export class DynamicContextStore {
   }
 
   recordUserText(text: string): void {
+    this.intent.observeVoice(text);
     this.user.recordUserText(text);
+  }
+
+  observeGaze(gaze: Parameters<IntentFusionStore['observeGaze']>[0]): void {
+    this.intent.observeGaze(gaze);
   }
 
   recordTaskEvent(event: ControllerEvent): void {
@@ -430,6 +446,7 @@ export class DynamicContextStore {
   }
 
   clearUserContext(): void {
+    this.intent.clearTransient();
     this.user.clear();
     this.runtimeResources.clear();
     this.refresh();
@@ -449,7 +466,7 @@ export class DynamicContextStore {
       return true;
     }
     if (
-      capability.id.startsWith('context.') &&
+      ['context.snapshot', 'context.resources'].includes(capability.id) &&
       this.current.activeResourceIds.length > 0
     ) {
       return true;
@@ -548,6 +565,7 @@ export class DynamicContextStore {
       snapshot.fallbackResourceIds.length
         ? 'Unknown active resources require UI Automation fallback.'
         : '',
+      this.intent.getContext(),
     ]
       .filter(Boolean)
       .join('\n');
@@ -563,6 +581,9 @@ export class DynamicContextStore {
       ...this.perceptionResources.list(now),
       ...[...this.runtimeResources.values()].map((entry) => entry.resource),
     ]);
+    if (this.syncPerceptionFacts(resources)) {
+      user = this.user.getSnapshot();
+    }
     const capabilities = this.options.capabilities();
     this.currentCapabilities = capabilities;
     const bindings = this.bindings.resolve(resources, capabilities);
@@ -596,6 +617,7 @@ export class DynamicContextStore {
 
     const nextSignature = bindingSignature(nextBase);
     this.current = nextBase;
+    this.intent.observeContext(nextBase);
     if (nextSignature === this.signature) {
       return this.current;
     }
@@ -784,6 +806,49 @@ export class DynamicContextStore {
         this.runtimeResources.delete(id);
       }
     }
+  }
+
+  private syncPerceptionFacts(resources: ResourceDescriptor[]): boolean {
+    let changed = false;
+    const focused = resources.find(
+      (resource) => resource.kind === 'control' && resource.active,
+    );
+    if (focused) {
+      const name =
+        typeof focused.metadata.name === 'string'
+          ? focused.metadata.name
+          : focused.name;
+      changed =
+        this.user.syncFocusedControl({
+          name,
+          role:
+            typeof focused.metadata.role === 'string'
+              ? focused.metadata.role
+              : undefined,
+          automationId:
+            typeof focused.metadata.automationId === 'string'
+              ? focused.metadata.automationId
+              : undefined,
+        }) || changed;
+      changed =
+        this.user.syncSelectedText(
+          typeof focused.metadata.selectedText === 'string'
+            ? focused.metadata.selectedText
+            : null,
+        ) || changed;
+    }
+    const clipboard = resources.find(
+      (resource) => resource.kind === 'clipboard' && resource.active,
+    );
+    if (clipboard) {
+      changed =
+        this.user.syncClipboard(
+          typeof clipboard.metadata.text === 'string'
+            ? clipboard.metadata.text
+            : null,
+        ) || changed;
+    }
+    return changed;
   }
 
   private async verifyResult(

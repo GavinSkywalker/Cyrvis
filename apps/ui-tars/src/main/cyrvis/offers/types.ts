@@ -10,6 +10,8 @@ export interface OfferConditions {
   transferCount?: number;
   departureTime?: string;
   arrivalTime?: string;
+  /** Total itinerary duration in minutes, when the provider supplies it. */
+  durationMinutes?: number;
 }
 
 export interface Offer {
@@ -34,6 +36,8 @@ export interface RankWeights {
   baggage: number;
   refundable: number;
   convenience: number;
+  /** Optional: prefer shorter itineraries when duration is known. */
+  duration?: number;
 }
 
 export interface RankResult {
@@ -48,4 +52,5 @@ export const DEFAULT_RANK_WEIGHTS: RankWeights = {
   baggage: 0.1,
   refundable: 0.1,
   convenience: 0.06,
+  duration: 0,
 };

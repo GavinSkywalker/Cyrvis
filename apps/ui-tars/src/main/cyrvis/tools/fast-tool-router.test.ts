@@ -12,10 +12,10 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { SENSITIVE_CONFIRMATION_PROMPT } from './confirmation-policy';
 import { createFastToolMatrix } from './matrix';
 import { createFastToolMcpServer } from './mcp-server';
 import { PathPolicy } from './path-policy';
-import { SENSITIVE_CONFIRMATION_PROMPT } from './confirmation-policy';
 import type {
   DesktopHost,
   DiskInfo,
@@ -103,6 +103,7 @@ class FakeDesktopHost implements DesktopHost {
     subtitle?: string;
   }): Promise<void> {
     this.presentations.push(input);
+    await fs.writeFile(input.path, Buffer.from([0x50, 0x4b, 0x03, 0x04]));
   }
 
   async systemInfo(): Promise<SystemInfo> {
@@ -137,9 +138,13 @@ describe('FastToolRouter', () => {
       await fs.mkdtemp(path.join(os.tmpdir(), 'cyrvis-fast-tools-')),
     );
     desktop = new FakeDesktopHost();
+    vi.stubEnv('CYRVIS_QWEN_DOC_API_KEY', '');
+    vi.stubEnv('DASHSCOPE_API_KEY', '');
+    vi.stubEnv('QWEN_API_KEY', '');
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await fs.rm(root, { recursive: true, force: true });
   });
 
@@ -174,6 +179,36 @@ describe('FastToolRouter', () => {
     expect(await fs.readFile(file, 'utf8')).toBe('开头第二行');
     expect((await router.handleText('执行')).ok).toBe(true);
     expect(await fs.readFile(file, 'utf8')).toBe('replacement');
+    const backups = (await fs.readdir(root)).filter((entry) =>
+      entry.includes('.cyrvis-backup-'),
+    );
+    expect(backups).toHaveLength(1);
+  });
+
+  it('deletes requested text lines directly by number, range, or content', async () => {
+    const { router } = matrix();
+    const file = path.join(root, 'lines.txt');
+    await fs.writeFile(file, 'first\nsecond\nremove-me\nfourth', 'utf8');
+
+    const byNumber = await router.handleText(`删除文件 ${file} 第2行`);
+    expect(byNumber.ok).toBe(true);
+    expect(await fs.readFile(file, 'utf8')).toBe('first\nremove-me\nfourth');
+
+    const byContent = await router.handleText(
+      `删除文件 ${file} 中 remove-me 的那一行`,
+    );
+    expect(byContent.ok).toBe(true);
+    expect(await fs.readFile(file, 'utf8')).toBe('first\nfourth');
+
+    const rangeCommand = `把文件 ${file} 第一行到第二行删掉`;
+    await expect(router.match(rangeCommand)).resolves.toMatchObject({
+      tool: 'fs.delete_lines',
+      args: { lineNumbers: [1, 2] },
+    });
+    const byRange = await router.handleText(rangeCommand);
+    expect(byRange.ok).toBe(true);
+    expect(byRange.result?.data).toMatchObject({ removedCount: 2 });
+    expect(await fs.readFile(file, 'utf8')).toBe('');
   });
 
   it('accepts compact speech-to-text commands and quoted paths with spaces', async () => {
@@ -393,6 +428,10 @@ describe('FastToolRouter', () => {
       tool: 'window.close',
       args: { query: '记事本' },
     });
+    expect(await router.match('关闭 Project Docs 网页')).toMatchObject({
+      tool: 'browser.close_page',
+      args: { query: 'Project Docs' },
+    });
 
     expect((await router.handleText('切换到窗口 demo.txt')).ok).toBe(true);
     expect(desktop.windowActions.at(-1)).toEqual({
@@ -427,16 +466,13 @@ describe('FastToolRouter', () => {
     const presentation = await router.handleText(
       `在 ${root} 创建一个关于人工智能的PPT`,
     );
-    expect(presentation.ok).toBe(true);
+    expect(presentation.ok, presentation.speech).toBe(true);
     expect(desktop.presentations.at(-1)?.title).toBe('人工智能');
     expect(desktop.presentations.at(-1)?.path).toContain('.pptx');
   });
 
   it('leaves non-command chat outside the fast tool matrix', async () => {
     const { router } = matrix();
-    expect(router.isConfirmationIntent('确认执行')).toBe(true);
-    expect(router.isConfirmationIntent('直行')).toBe(true);
-    expect(router.isConfirmationIntent('取消')).toBe(true);
     expect((await router.match('查看桌面下有什么'))?.tool).toBe(
       'fs.list_directory',
     );
@@ -478,18 +514,11 @@ describe('FastToolRouter', () => {
     expect(result.isError).not.toBe(true);
     expect(desktop.clipboard).toBe('through-mcp');
 
-    const denied = await client.callTool({
+    const closed = await client.callTool({
       name: 'app.close',
       arguments: { name: 'notepad' },
     });
-    expect(denied.isError).toBe(true);
-    expect(desktop.closedApplications).toEqual([]);
-
-    const confirmed = await client.callTool({
-      name: 'app.close',
-      arguments: { name: 'notepad', __confirmed: true },
-    });
-    expect(confirmed.isError).not.toBe(true);
+    expect(closed.isError).not.toBe(true);
     expect(desktop.closedApplications).toEqual(['notepad']);
 
     registry.register({

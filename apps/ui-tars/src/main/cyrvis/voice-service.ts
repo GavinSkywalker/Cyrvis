@@ -11,6 +11,7 @@ import {
 import { GazeObjectTracker } from './gaze/object-tracker';
 import { NativeGazeObjects } from './gaze/native-objects';
 import { showCompanion } from '@main/window';
+import { updateCompanionTasks } from '@main/window/companionWindow';
 /*
  * Copyright (c) 2025 Bytedance, Inc. and its affiliates.
  * SPDX-License-Identifier: Apache-2.0
@@ -18,6 +19,7 @@ import { showCompanion } from '@main/window';
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import { app, BrowserWindow, globalShortcut, ipcMain, screen } from 'electron';
@@ -26,10 +28,22 @@ import * as env from '@main/env';
 import { logger } from '@main/logger';
 import { getCompanionStore } from '@main/store/companion';
 import { resolveCompanionSkin } from '@shared/companion-skins';
+import type { CompanionTask } from '@shared/companion';
+import { GAZE_CALIBRATION_NOTICE } from '@shared/gaze';
 import { SettingStore } from '@main/store/setting';
 import { breezeTtsService } from '@main/services/breezeTts';
 import { qwenTtsRealtimeService } from '@main/services/qwenTtsRealtime';
 import { localTtsService } from './voice/local-tts';
+import {
+  OrchestrationRuntime,
+  ScheduledCodingAgent,
+  ScheduledFastToolExecutor,
+  ScheduledTaskController,
+  isUserVisibleCompanionTask,
+  toCompanionTasks,
+  toCompanionTaskStatus,
+} from './orchestration';
+import type { RuntimeTask } from './orchestration/types';
 import {
   describeControllerEvent,
   describeVoiceToolCall,
@@ -40,7 +54,7 @@ import {
 
 import { startCaptureService, type CaptureService } from './capture-service';
 import { CodingAgentService } from './coding-agent';
-import { CyrvisController } from './controller';
+import { CyrvisController, type TaskController } from './controller';
 import { openApp } from './desktop-actions';
 import { ElectronGUIAdapter } from './gui-adapter';
 import { KeywordGate } from './keyword-gate';
@@ -49,7 +63,8 @@ import { SpeakerEchoDetector, type SpeakerEchoAnalysis } from './speaker-barge';
 import { isLikelySpeakerEcho } from './speaker-echo';
 import { composeContextSections, type DynamicContextStore } from './context';
 import { LocalDesktopHost } from './tools/desktop-host';
-import { createFastToolMatrix } from './tools';
+import { createFastToolMatrix, type FastToolMatrix } from './tools';
+import { configureQwenDocPresentation } from './tools/qwen-doc-presentation';
 import { SystemStateStore } from './system/system-state';
 import { CascadeVoiceProvider } from './voice/cascade-provider';
 import { QwenOmniProvider } from './voice/qwen-omni';
@@ -62,12 +77,40 @@ import type { ControllerEvent } from './types';
 interface VoiceService {
   brain: VoiceBrain;
   provider: InteractiveVoiceProvider;
-  controller: CyrvisController;
+  controller: TaskController;
   systemState: SystemStateStore;
   dynamicContext?: DynamicContextStore;
+  runtime?: OrchestrationRuntime;
 }
 
+const runtimeTaskActivity = (task: RuntimeTask): string => {
+  const reported = task.progress?.message?.trim();
+  if (
+    reported &&
+    !/^(?:atomic_prepared|gui_|coding_|workflow_)[a-z0-9_]*$/i.test(reported)
+  ) {
+    return reported.replace(/qwen-doc-turbo/gi, '演示文稿制作').slice(0, 160);
+  }
+  const phase = task.checkpoint?.phase || '';
+  if (/^workflow_/i.test(phase)) return '正在推进任务步骤';
+  if (/^gui_/i.test(phase)) return '正在操作桌面应用';
+  if (/^coding_/i.test(phase)) return '正在处理代码和文件';
+  if (/^atomic_prepared/i.test(phase)) return '正在准备执行';
+  return '仍在处理中';
+};
+
+const runtimeTaskHeartbeatText = (task: RuntimeTask): string => {
+  const title = task.goal.replace(/\s+/g, ' ').trim().slice(0, 64);
+  const percent = task.progress?.percent;
+  const progress =
+    typeof percent === 'number' ? `，当前进度约 ${percent}%` : '';
+  return `${title}${progress}。${runtimeTaskActivity(task)}。`;
+};
+
 let service: VoiceService | null = null;
+let fastToolMatrix: FastToolMatrix | null = null;
+let orchestrationRuntime: OrchestrationRuntime | null = null;
+let taskStackProvider: (() => CompanionTask[]) | null = null;
 let lastGazeVoiceActivityAt = 0;
 let activeVoiceReadoutId: string | undefined;
 let replayedGazeId: string | undefined;
@@ -141,6 +184,7 @@ let speakerOutputMode = false;
 // barge must not run: the mic hears the assistant's own speaker output.
 let externalOutput = false;
 let speakerGuardUntil = 0;
+let criticalAnnouncementUntil = 0;
 let lastAssistantText = '';
 let lastAssistantAt = 0;
 let ipcRegistered = false;
@@ -148,6 +192,17 @@ let testAudioActive = false;
 let pttActive = false;
 // Hands-free by default. PTT remains available as a fallback mode.
 const pttMode = false;
+
+const speakCriticalAnnouncement = (text: string): boolean => {
+  if (!service || !text.trim()) return false;
+  const estimatedMs = Math.max(
+    4_000,
+    Math.min(45_000, Array.from(text).length * 320 + 2_000),
+  );
+  criticalAnnouncementUntil = Date.now() + estimatedMs;
+  service.brain.speakRequestedReply(text);
+  return true;
+};
 
 /** Speak a proactive reminder through the active realtime voice session. */
 export const speakProactiveText = (text: string): boolean => {
@@ -809,6 +864,12 @@ const handleCapturePcm = (pcm16: Int16Array): void => {
   if (keywordPreroll.length > 50) {
     keywordPreroll.shift();
   }
+  if (assistantPlaybackActive && now < criticalAnnouncementUntil) {
+    speakerCandidateMs = 0;
+    headsetBargeMs = 0;
+    voiceFallbackMs = 0;
+    return;
+  }
   if (assistantPlaybackActive) {
     bargeSampleBuffer.push(pcm16.slice());
     if (bargeSampleBuffer.length > BARGE_SAMPLE_MAX_CHUNKS) {
@@ -1108,6 +1169,12 @@ const broadcast = (channel: string, payload?: unknown) => {
   }
 };
 
+const broadcastTaskStack = () => {
+  const tasks = taskStackProvider?.() || [];
+  broadcast('cyrvis:tasks:stack', tasks);
+  updateCompanionTasks(tasks);
+};
+
 const emitActivity = (
   kind: CyrvisActivityEvent['kind'],
   text: string,
@@ -1166,6 +1233,7 @@ const triggerBargeIn = (hardStop = false) => {
     bargeTrace.bargeAt = Date.now();
   }
   const wasPlaying = assistantPlaybackActive;
+  criticalAnnouncementUntil = 0;
   expectSpeakerBargeStop();
   assistantPlaybackActive = false;
   capturePreroll = [];
@@ -1203,6 +1271,91 @@ const registerVoiceIpc = () => {
   }
   ipcRegistered = true;
 
+  ipcMain.handle('cyrvis:runtime:snapshot', () => {
+    return orchestrationRuntime?.publicSnapshot() || null;
+  });
+  ipcMain.handle('cyrvis:runtime:tasks', (_event, activeOnly) => {
+    return (
+      orchestrationRuntime
+        ?.publicSnapshot()
+        .taskQueue.tasks.filter(
+          (task) =>
+            activeOnly !== true ||
+            !['done', 'failed', 'cancelled'].includes(task.status),
+        ) || []
+    );
+  });
+  ipcMain.handle('cyrvis:tasks:stack', () => taskStackProvider?.() || []);
+  ipcMain.handle(
+    'cyrvis:runtime:task-action',
+    async (_event, action, taskId) => {
+      if (!orchestrationRuntime || typeof taskId !== 'string') return null;
+      if (action === 'pause') await orchestrationRuntime.pauseTask(taskId);
+      else if (action === 'resume')
+        await orchestrationRuntime.resumeTask(taskId);
+      else if (action === 'cancel')
+        await orchestrationRuntime.cancelTask(taskId);
+      else if (action === 'confirm')
+        await orchestrationRuntime.confirmTask(taskId);
+      else if (action === 'retry') await orchestrationRuntime.retryTask(taskId);
+      else return null;
+      broadcastTaskStack();
+      return orchestrationRuntime.publicTask(taskId);
+    },
+  );
+  ipcMain.handle(
+    'cyrvis:runtime:autonomy-configure',
+    async (_event, mode, maxPerHour) => {
+      if (
+        !orchestrationRuntime ||
+        !['off', 'suggest', 'low-risk'].includes(mode)
+      ) {
+        return null;
+      }
+      return orchestrationRuntime.autonomy.configure(
+        mode,
+        typeof maxPerHour === 'number' ? maxPerHour : undefined,
+      );
+    },
+  );
+  ipcMain.handle(
+    'cyrvis:runtime:autonomy-action',
+    async (_event, action, proposalId) => {
+      if (!orchestrationRuntime || typeof proposalId !== 'string') return null;
+      if (action === 'accept') {
+        const task = await orchestrationRuntime.autonomy.accept(proposalId);
+        return task ? orchestrationRuntime.publicTask(task.id) : null;
+      }
+      if (action === 'reject') {
+        return orchestrationRuntime.autonomy.reject(proposalId);
+      }
+      return null;
+    },
+  );
+  ipcMain.handle(
+    'cyrvis:runtime:capability-action',
+    async (_event, action, proposalId) => {
+      if (!orchestrationRuntime || typeof proposalId !== 'string') return null;
+      if (action === 'approve') {
+        return orchestrationRuntime.capabilitySynthesis.approve(proposalId);
+      }
+      if (action === 'reject') {
+        return orchestrationRuntime.capabilitySynthesis.reject(proposalId);
+      }
+      return null;
+    },
+  );
+  ipcMain.handle('cyrvis:runtime:memory', (_event, limit) => {
+    return (
+      orchestrationRuntime?.memoryEntries(
+        typeof limit === 'number' ? limit : 100,
+      ) || []
+    );
+  });
+  ipcMain.handle('cyrvis:runtime:clear-memory', async () => {
+    await orchestrationRuntime?.memory.clear();
+  });
+
   const desktopCursor = new DesktopGazeCursor();
   const nativeObjects = new NativeGazeObjects((capture) =>
     desktopCursor.withHiddenOverlay(capture),
@@ -1213,6 +1366,7 @@ const registerVoiceIpc = () => {
     onGaze: (gaze) => {
       const value = gazeInspector.getStatus().enabled ? gaze : null;
       setDesktopGaze(value);
+      fastToolMatrix?.dynamicContext.observeGaze(getDesktopGaze());
       proactiveGaze.update(value);
     },
   });
@@ -1312,6 +1466,14 @@ const registerVoiceIpc = () => {
   ipcMain.handle('cyrvis:gaze:inspection-status', () =>
     gazeInspector.getStatus(),
   );
+  ipcMain.handle('cyrvis:gaze:announce-calibration', () => {
+    if (!service) {
+      return { spoken: false, reason: '语音助手尚未启动' };
+    }
+    return speakCriticalAnnouncement(GAZE_CALIBRATION_NOTICE)
+      ? { spoken: true, text: GAZE_CALIBRATION_NOTICE }
+      : { spoken: false, reason: '语音助手尚未启动' };
+  });
   ipcMain.handle('cyrvis:gaze:inspect', async () => {
     proactiveGaze.snooze();
     service?.brain.clearGazeSuggestion();
@@ -1338,9 +1500,12 @@ const registerVoiceIpc = () => {
       });
   });
   ipcMain.handle('cyrvis:gaze:cursor', (_event, sample) => {
-    if (objectTracker.getStatus().enabled)
-      objectTracker.update(rawGaze(sample));
-    else desktopCursor.update(sample);
+    const gaze = rawGaze(sample);
+    desktopCursor.update(sample);
+    if (objectTracker.getStatus().enabled) objectTracker.update(gaze);
+    fastToolMatrix?.dynamicContext.observeGaze(
+      gazeInspector.getStatus().enabled ? getDesktopGaze() || gaze : null,
+    );
   });
   ipcMain.handle('cyrvis:gaze:cursor-enabled', (_event, enabled) =>
     desktopCursor.setEnabled(enabled === true),
@@ -1394,6 +1559,7 @@ const registerVoiceIpc = () => {
     }
     if (!sample) {
       setDesktopGaze(null);
+      fastToolMatrix?.dynamicContext.observeGaze(null);
       proactiveGaze.update(null);
       return;
     }
@@ -1408,6 +1574,7 @@ const registerVoiceIpc = () => {
     )
       return;
     setDesktopGaze({ x: sample.x, y: sample.y });
+    fastToolMatrix?.dynamicContext.observeGaze(getDesktopGaze());
     proactiveGaze.update(getDesktopGaze());
     // Read the current sample at tool invocation. Repeated session.update calls
     // can overwrite the voice provider's in-flight speech instructions.
@@ -1452,6 +1619,7 @@ const registerVoiceIpc = () => {
     captureService?.close();
     captureService = null;
     assistantPlaybackActive = false;
+    criticalAnnouncementUntil = 0;
     resetSpeakerDetection();
     keywordGate?.reset();
     broadcast('cyrvis:voice:response-stopped');
@@ -1785,6 +1953,7 @@ const registerVoiceIpc = () => {
       speakerBargeStopTimer = null;
     }
     assistantPlaybackActive = false;
+    criticalAnnouncementUntil = 0;
     keywordRejectUntil = 0;
     keywordGate?.reset();
     resetSpeakerDetection();
@@ -1886,6 +2055,19 @@ export const startVoiceService = (): VoiceService | null => {
   }
 
   const settings = SettingStore.getStore();
+  const conversationBaseUrl =
+    settings.conversationBaseUrl ||
+    process.env.CONVERSATION_BASE_URL ||
+    'https://dashscope.aliyuncs.com/compatible-mode/v1';
+  const qwenDocCompatible =
+    /dashscope\.aliyuncs\.com|maas\.aliyuncs\.com/i.test(conversationBaseUrl);
+  configureQwenDocPresentation({
+    // secretlint-disable-next-line @secretlint/secretlint-rule-pattern
+    apiKey: qwenDocCompatible
+      ? settings.conversationApiKey || process.env.CONVERSATION_API_KEY
+      : undefined,
+    baseUrl: qwenDocCompatible ? conversationBaseUrl : undefined,
+  });
   selectedVoiceEngine = settings.voiceEngine || env.voiceEngine;
   if (settings.voiceEnabled === false) {
     logger.info('[cyrvis voice] disabled by settings');
@@ -1941,6 +2123,9 @@ export const startVoiceService = (): VoiceService | null => {
     process.platform === 'win32' &&
     process.env.CYRVIS_VOICE_TEST !== '1' &&
     process.env.CYRVIS_NATIVE_FOREGROUND_EVENTS !== '0';
+  const runtimeMonitorIntervalMs = Number(
+    process.env.CYRVIS_RUNTIME_MONITOR_INTERVAL_MS,
+  );
   const systemState = new SystemStateStore(desktopHost, {
     runtimeRefreshMs:
       Number.isFinite(runtimeRefreshMs) && runtimeRefreshMs >= 1_000
@@ -1950,17 +2135,35 @@ export const startVoiceService = (): VoiceService | null => {
       Number.isFinite(fullRefreshMs) && fullRefreshMs >= 60_000
         ? fullRefreshMs
         : undefined,
+    runtimeMonitor:
+      process.platform === 'win32' &&
+      process.env.CYRVIS_VOICE_TEST !== '1' &&
+      process.env.CYRVIS_RUNTIME_MONITOR !== '0',
+    runtimeMonitorIntervalMs:
+      Number.isFinite(runtimeMonitorIntervalMs) &&
+      runtimeMonitorIntervalMs >= 250
+        ? runtimeMonitorIntervalMs
+        : undefined,
+    runtimeMonitorScriptPath:
+      process.env.CYRVIS_RUNTIME_MONITOR_SCRIPT?.trim() || undefined,
   });
   systemState.start();
   const userDataDirectory =
-    typeof app.getPath === 'function' ? app.getPath('userData') : process.cwd();
+    process.env.CYRVIS_VOICE_TEST === '1'
+      ? path.join(
+          os.tmpdir(),
+          `cyrvis-voice-test-${process.pid}-${randomUUID()}`,
+        )
+      : typeof app.getPath === 'function'
+        ? app.getPath('userData')
+        : process.cwd();
   const configuredManifestDirectories = (
     process.env.CYRVIS_PROVIDER_MANIFEST_DIRS || ''
   )
     .split(/[;\r\n]/)
     .map((entry) => entry.trim())
     .filter(Boolean);
-  const fastToolMatrix =
+  fastToolMatrix =
     process.env.CYRVIS_FAST_TOOLS === '0'
       ? null
       : createFastToolMatrix(desktopHost, process.cwd(), systemState, {
@@ -1969,6 +2172,15 @@ export const startVoiceService = (): VoiceService | null => {
               ? foregroundRefreshMs
               : undefined,
           nativeForegroundEvents,
+          enableFilePerception: process.env.CYRVIS_FILE_PERCEPTION !== '0',
+          filePerceptionRoots: process.env.CYRVIS_FILE_PERCEPTION_ROOTS?.split(
+            ';',
+          )
+            .map((entry) => entry.trim())
+            .filter(Boolean),
+          filePerceptionIntervalMs: Number(
+            process.env.CYRVIS_FILE_PERCEPTION_MS,
+          ),
           foregroundScriptPath:
             process.env.CYRVIS_FOREGROUND_EVENT_SCRIPT?.trim() || undefined,
           manifestDirectories: [
@@ -1986,7 +2198,132 @@ export const startVoiceService = (): VoiceService | null => {
             userDataDirectory,
             'cyrvis-tool-audit.jsonl',
           ),
+          workflowStateFile: path.join(
+            userDataDirectory,
+            'cyrvis-workflows.json',
+          ),
+          timelineStateFile: path.join(
+            userDataDirectory,
+            'cyrvis-user-timeline.json',
+          ),
+          enableClipboardPerception:
+            process.env.CYRVIS_VOICE_TEST !== '1' &&
+            process.env.CYRVIS_CLIPBOARD_PERCEPTION !== '0',
+          clipboardPerceptionIntervalMs: Number(
+            process.env.CYRVIS_CLIPBOARD_PERCEPTION_MS,
+          ),
+          includeClipboardContent: process.env.CYRVIS_CLIPBOARD_CONTENT === '1',
+          enableUiFocusPerception:
+            process.platform === 'win32' &&
+            process.env.CYRVIS_VOICE_TEST !== '1' &&
+            process.env.CYRVIS_UI_FOCUS_PERCEPTION !== '0',
+          uiFocusPerceptionIntervalMs: Number(
+            process.env.CYRVIS_UI_FOCUS_PERCEPTION_MS,
+          ),
+          includeSelectedText:
+            process.env.CYRVIS_SELECTED_TEXT_PERCEPTION !== '0',
         });
+  const toolMatrix = fastToolMatrix;
+  orchestrationRuntime = toolMatrix
+    ? new OrchestrationRuntime(
+        {
+          registry: toolMatrix.registry,
+          catalog: toolMatrix.capabilityCatalog,
+          systemState,
+          context: toolMatrix.dynamicContext,
+          workflow: toolMatrix.workflow,
+          controller,
+          codingAgent,
+          providerRegistry: toolMatrix.providerRegistry,
+        },
+        {
+          stateDirectory: path.join(userDataDirectory, 'cyrvis-runtime'),
+          autonomyMode: (['off', 'suggest', 'low-risk'].includes(
+            process.env.CYRVIS_AUTONOMY_MODE || '',
+          )
+            ? process.env.CYRVIS_AUTONOMY_MODE
+            : 'suggest') as 'off' | 'suggest' | 'low-risk',
+          maxConcurrentTasks: Number(process.env.CYRVIS_MAX_CONCURRENT_TASKS),
+          maxInteractiveTasks: Number(process.env.CYRVIS_MAX_INTERACTIVE_TASKS),
+          maxNormalTasks: Number(process.env.CYRVIS_MAX_NORMAL_TASKS),
+          maxBackgroundTasks: Number(process.env.CYRVIS_MAX_BACKGROUND_TASKS),
+          taskIdempotencyTtlMs: Number(
+            process.env.CYRVIS_TASK_IDEMPOTENCY_TTL_MS,
+          ),
+          capabilityApiKey:
+            settings.conversationApiKey ||
+            process.env.CONVERSATION_API_KEY ||
+            process.env.QWEN_API_KEY,
+          capabilityBaseUrl:
+            settings.conversationBaseUrl ||
+            process.env.CONVERSATION_BASE_URL ||
+            'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          capabilityModel:
+            process.env.CYRVIS_CAPABILITY_MODEL?.trim() ||
+            settings.conversationModelName ||
+            process.env.CONVERSATION_MODEL_NAME ||
+            'qwen-plus',
+          capabilityIntervalMs: Number(
+            process.env.CYRVIS_CAPABILITY_SYNTHESIS_MS,
+          ),
+        },
+      )
+    : null;
+  if (orchestrationRuntime) {
+    void orchestrationRuntime.start().catch((error: unknown) => {
+      logger.warn('[cyrvis runtime] start failed', error);
+    });
+  }
+  const scheduledFastTools =
+    orchestrationRuntime && toolMatrix
+      ? new ScheduledFastToolExecutor(orchestrationRuntime.scheduler)
+      : null;
+  if (scheduledFastTools && toolMatrix) {
+    toolMatrix.router.setExecutionScheduler(scheduledFastTools);
+  }
+  const managedController = orchestrationRuntime
+    ? new ScheduledTaskController(orchestrationRuntime.scheduler)
+    : controller;
+  const managedCodingAgent = orchestrationRuntime
+    ? new ScheduledCodingAgent(
+        orchestrationRuntime.scheduler,
+        codingAgent.getWorkspace(),
+      )
+    : codingAgent;
+  taskStackProvider = () => {
+    let tasks: CompanionTask[] = [];
+    if (orchestrationRuntime) {
+      tasks = toCompanionTasks(orchestrationRuntime.tasks(true).tasks);
+    } else {
+      const guiTask = managedController.getStatus();
+      const guiStatus = toCompanionTaskStatus(guiTask.status);
+      if (guiTask.taskId && guiStatus) {
+        tasks.push({
+          id: guiTask.taskId,
+          kind: 'gui',
+          title: guiTask.instruction || '桌面任务',
+          status: guiStatus,
+          message: guiTask.lastSummary || guiTask.error || '正在执行',
+          startedAt: guiTask.startedAt,
+          updatedAt: Date.now(),
+        });
+      }
+      const codingTask = managedCodingAgent.getStatus();
+      const codingStatus = toCompanionTaskStatus(codingTask.status);
+      if (codingTask.taskId && codingStatus) {
+        tasks.push({
+          id: codingTask.taskId,
+          kind: 'coding',
+          title: codingTask.instruction || '编码任务',
+          status: codingStatus,
+          message: codingTask.lastMessage || codingTask.error || '正在执行',
+          startedAt: codingTask.startedAt,
+          updatedAt: Date.now(),
+        });
+      }
+    }
+    return tasks;
+  };
   const buildVoiceTools = () =>
     buildVoiceToolSurface(fastToolMatrix?.providerCatalog.tools);
   const voiceTools = buildVoiceTools();
@@ -2001,6 +2338,16 @@ export const startVoiceService = (): VoiceService | null => {
   let unsubscribeFastToolUpdates: (() => void) | null = null;
   let unsubscribeContextEvents: (() => void) | null = null;
   let unsubscribeContextSnapshots: (() => void) | null = null;
+  let unsubscribeWorkflowEvents: (() => void) | null = null;
+  let unsubscribeRuntimeSnapshots: (() => void) | null = null;
+  let unsubscribeRuntimeTasks: (() => void) | null = null;
+  let unsubscribeAutonomyProposals: (() => void) | null = null;
+  let unsubscribeCapabilityProposals: (() => void) | null = null;
+  let runtimeHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  const runtimeProgressSpokenAt = new Map<
+    string,
+    { at: number; message: string }
+  >();
   const requireWakeWord = settings.voiceRequireWakeWord ?? true;
   const configuredWakeWord = settings.voiceWakeWord?.trim();
   const escapeRegExp = (value: string) =>
@@ -2018,7 +2365,7 @@ export const startVoiceService = (): VoiceService | null => {
     : undefined;
 
   const brain = new VoiceBrain(
-    controller,
+    managedController,
     {
       onAudio: (pcm16) => {
         const copy = pcm16.slice();
@@ -2038,6 +2385,7 @@ export const startVoiceService = (): VoiceService | null => {
         broadcast('cyrvis:voice:transcript', { text, final });
         if (final) {
           fastToolMatrix?.dynamicContext.recordUserText(text);
+          void orchestrationRuntime?.recordUserText(text);
           recordTurn('user', text);
         }
       },
@@ -2052,6 +2400,7 @@ export const startVoiceService = (): VoiceService | null => {
         lastAssistantAt = Date.now();
         lastAssistantText = final ? text : `${lastAssistantText}${text}`;
         if (final) {
+          void orchestrationRuntime?.recordAssistantText(text);
           recordTurn('assistant', text);
         }
       },
@@ -2074,6 +2423,7 @@ export const startVoiceService = (): VoiceService | null => {
         fastToolMatrix?.dynamicContext.recordTaskEvent(event);
         void syncProviderMemoryContext();
         broadcast('cyrvis:voice:task-event', event);
+        broadcastTaskStack();
         const text = describeControllerEvent(event);
         if (text) {
           emitActivity(event.type === 'task_failed' ? 'error' : 'task', text);
@@ -2106,6 +2456,11 @@ export const startVoiceService = (): VoiceService | null => {
             !assistantPlaybackActive &&
             Date.now() >= speakerGuardUntil &&
             service?.brain.isGazeFollowup(text) === true;
+          const actionableTranscript =
+            fastToolMatrix?.router.canHandle(text) === true ||
+            /(打开|启动|关闭|关掉|写入|写到|保存到|创建|新建|生成|制作|下载|安装|打开网页|关闭网页)/i.test(
+              text,
+            );
           // Opt-in only: the enrolled embedding does not reliably match the
           // Bluetooth/AEC microphone window on this machine (real user speech
           // scored 0.01-0.05 against a 0.22 threshold). Keep the implementation
@@ -2141,6 +2496,7 @@ export const startVoiceService = (): VoiceService | null => {
           }
           if (
             final &&
+            !actionableTranscript &&
             !pendingConfirmationReply &&
             !explicitConfirmation &&
             !gazeConfirmation &&
@@ -2330,17 +2686,49 @@ export const startVoiceService = (): VoiceService | null => {
       memoryContextProvider: async () =>
         composeContextSections(
           [
-            fastToolMatrix?.dynamicContext.getContext(),
+            orchestrationRuntime?.getContext() ||
+              fastToolMatrix?.dynamicContext.getContext(),
             await voiceMemoryService.getContext(),
-            systemState.getContext(40),
           ],
           providerContextMaxChars,
         ),
       fastToolRouter: fastToolMatrix?.router,
-      codingAgent,
+      codingAgent: managedCodingAgent,
       classifyPendingIntent: pendingIntentClassifier
         ? (input) => pendingIntentClassifier.classify(input)
         : undefined,
+      getWorkflowStatus: () => {
+        const run = toolMatrix?.workflow.latestSnapshot(false);
+        if (
+          !run ||
+          (['done', 'failed', 'cancelled'].includes(run.status) &&
+            Date.now() - (run.endedAt || 0) > 120_000)
+        ) {
+          return null;
+        }
+        return run
+          ? {
+              name: run.name,
+              status: run.status,
+              currentStepId: run.currentStepId,
+              pendingConfirmation: run.pendingConfirmation
+                ? {
+                    stepId: run.pendingConfirmation.stepId,
+                    reason: run.pendingConfirmation.reason,
+                  }
+                : null,
+              totalSteps: run.steps.length,
+              completedSteps: run.steps.filter((step) => step.status === 'done')
+                .length,
+            }
+          : null;
+      },
+      cancelWorkflow: async () => {
+        if (!toolMatrix) return false;
+        const run = toolMatrix.workflow.latestSnapshot(true);
+        if (!run) return false;
+        return Boolean(await toolMatrix.workflow.cancel(run.id));
+      },
       rememberFact: async (text) => {
         const remembered = await voiceMemoryService.rememberFact(text);
         if (remembered) {
@@ -2350,8 +2738,13 @@ export const startVoiceService = (): VoiceService | null => {
       },
     },
   );
+  if (fastToolMatrix) {
+    fastToolMatrix.context.reportProgress = (message) =>
+      brain.announceProgress(message);
+  }
 
   codingAgent.setStatusListener((snapshot) => {
+    broadcastTaskStack();
     if (snapshot.status === 'running' && snapshot.lastMessage) {
       emitActivity('task', `编码进度：${snapshot.lastMessage}`);
     }
@@ -2373,10 +2766,12 @@ export const startVoiceService = (): VoiceService | null => {
   service = {
     brain,
     provider,
-    controller,
+    controller: managedController,
     systemState,
     dynamicContext: fastToolMatrix?.dynamicContext,
+    runtime: orchestrationRuntime || undefined,
   };
+  broadcastTaskStack();
   const unsubscribeSkin = companionStore.onDidChange('skinId', (skinId) => {
     // Companion voices apply to Omni; cascade retains its configured TTS voice.
     if (!(provider instanceof QwenOmniProvider)) return;
@@ -2405,22 +2800,22 @@ export const startVoiceService = (): VoiceService | null => {
     });
   });
   unsubscribeFastToolUpdates =
-    fastToolMatrix?.providerCatalog.subscribe?.(() => {
+    toolMatrix?.providerCatalog.subscribe?.(() => {
       const nextTools = buildVoiceTools();
       provider.setTools?.(nextTools);
       logger.info('[cyrvis fast-tools] tool surface updated', {
-        registryTools: fastToolMatrix.registry.list().length,
+        registryTools: toolMatrix.registry.list().length,
         providerTools: nextTools.length,
-        revision: fastToolMatrix.providerCatalog.revision,
+        revision: toolMatrix.providerCatalog.revision,
       });
     }) ?? null;
-  if (fastToolMatrix) {
-    void fastToolMatrix.providerManager
+  if (toolMatrix) {
+    void toolMatrix.providerManager
       .start()
       .then(() => {
         logger.info('[cyrvis providers] started', {
-          providers: fastToolMatrix.providerManager.list().length,
-          tools: fastToolMatrix.registry.list().length,
+          providers: toolMatrix.providerManager.list().length,
+          tools: toolMatrix.registry.list().length,
         });
       })
       .catch((error: unknown) => {
@@ -2428,18 +2823,149 @@ export const startVoiceService = (): VoiceService | null => {
       });
   }
   unsubscribeContextEvents =
-    fastToolMatrix?.dynamicContext.subscribeEvents((event) => {
+    toolMatrix?.dynamicContext.subscribeEvents((event) => {
       if (event.type === 'foreground_changed') {
-        void fastToolMatrix?.providerManager.refresh().catch((error) => {
+        void toolMatrix?.providerManager.refresh().catch((error) => {
           logger.warn('[cyrvis providers] foreground refresh failed', error);
         });
       }
     }) ?? null;
   unsubscribeContextSnapshots =
-    fastToolMatrix?.dynamicContext.subscribe(() => {
+    toolMatrix?.dynamicContext.subscribe(() => {
       broadcast(
         'cyrvis:voice:context',
-        fastToolMatrix.dynamicContext.getPublicSnapshot(),
+        toolMatrix.dynamicContext.getPublicSnapshot(),
+      );
+    }) ?? null;
+  unsubscribeWorkflowEvents =
+    toolMatrix?.workflow.subscribe((event) => {
+      if (
+        ![
+          'started',
+          'step_done',
+          'waiting_confirmation',
+          'done',
+          'failed',
+          'cancelled',
+        ].includes(event.type)
+      ) {
+        return;
+      }
+      if (event.type === 'step_done') {
+        const progress = `${event.run.steps.filter((step) => step.status === 'done').length}/${event.run.steps.length}`;
+        emitActivity('task', `工作流进度 ${progress}：${event.message}`);
+        service?.brain.announceProgress(
+          `工作流进度 ${progress}：${event.message}`,
+        );
+        return;
+      }
+      emitActivity('task', event.message);
+      service?.brain.speakRequestedReply(event.message);
+    }) ?? null;
+  unsubscribeRuntimeSnapshots =
+    orchestrationRuntime?.world.subscribe(() => {
+      broadcast(
+        'cyrvis:runtime:snapshot',
+        orchestrationRuntime?.publicSnapshot(),
+      );
+    }) ?? null;
+  unsubscribeRuntimeTasks =
+    orchestrationRuntime?.scheduler.subscribe((event) => {
+      broadcastTaskStack();
+      const terminal = ['done', 'failed', 'cancelled'].includes(event.type);
+      if (terminal) runtimeProgressSpokenAt.delete(event.task.id);
+      const heartbeat = event.source === 'heartbeat';
+      const visibleTask = isUserVisibleCompanionTask(event.task);
+      const fastTool = event.task.payload.metadata?.fastTool === true;
+      if (!heartbeat && !visibleTask) return;
+      if (
+        fastTool &&
+        event.type !== 'progress' &&
+        event.type !== 'checkpoint'
+      ) {
+        return;
+      }
+      if (event.type === 'checkpoint') {
+        emitActivity('task', event.message);
+        return;
+      }
+      if (!heartbeat && ['gui', 'coding'].includes(event.task.kind)) return;
+      const lifecycle = [
+        'started',
+        'waiting_confirmation',
+        'paused',
+        'resumed',
+        'done',
+        'failed',
+        'cancelled',
+      ].includes(event.type);
+      const progress = event.type === 'progress';
+      if (!lifecycle && !progress) {
+        return;
+      }
+      if (progress) {
+        const now = Date.now();
+        const previous = runtimeProgressSpokenAt.get(event.task.id);
+        const gap = previous ? now - previous.at : Number.POSITIVE_INFINITY;
+        if (heartbeat && gap < 10_000) return;
+        if (!heartbeat && previous?.message === event.message && gap < 15_000) {
+          return;
+        }
+        if (!heartbeat && previous?.message !== event.message && gap < 5_000) {
+          return;
+        }
+        runtimeProgressSpokenAt.set(event.task.id, {
+          at: now,
+          message: event.message,
+        });
+      }
+      emitActivity('task', event.message);
+      brain.announceProgress(event.message);
+    }) ?? null;
+  runtimeHeartbeatTimer = orchestrationRuntime
+    ? setInterval(() => {
+        const now = Date.now();
+        const tasks = orchestrationRuntime?.tasks(true).tasks || [];
+        for (const task of tasks) {
+          if (task.status !== 'running' || !isUserVisibleCompanionTask(task)) {
+            continue;
+          }
+          const lastUpdate =
+            task.progress?.updatedAt || task.startedAt || task.updatedAt;
+          if (now - lastUpdate < 10_000) continue;
+          void orchestrationRuntime?.scheduler.heartbeat(
+            task.id,
+            runtimeTaskHeartbeatText(task),
+          );
+        }
+      }, 10_000)
+    : null;
+  runtimeHeartbeatTimer?.unref?.();
+  unsubscribeAutonomyProposals =
+    orchestrationRuntime?.autonomy.subscribeProposals((proposal) => {
+      if (
+        proposal.status !== 'proposed' ||
+        !proposal.interruptive ||
+        (orchestrationRuntime?.autonomy.snapshot().mode === 'low-risk' &&
+          proposal.risk === 'low') ||
+        service?.controller.isBusy() ||
+        managedCodingAgent.isBusy()
+      ) {
+        return;
+      }
+      emitActivity('task', `自主建议：${proposal.title}`);
+      service?.brain.speakRequestedReply(
+        `我有个可选建议：${proposal.title}。${proposal.reason}`,
+      );
+    }) ?? null;
+  unsubscribeCapabilityProposals =
+    orchestrationRuntime?.capabilitySynthesis.subscribeProposals((proposal) => {
+      emitActivity('memory', `发现新能力：${proposal.title}`);
+      if (service?.controller.isBusy() || managedCodingAgent.isBusy()) {
+        return;
+      }
+      service?.brain.speakRequestedReply(
+        `我发现一个可以复用的新能力：${proposal.title}。请在运行面板中审核。`,
       );
     }) ?? null;
   let lastSystemContextSyncAt = 0;
@@ -2537,7 +3063,29 @@ export const startVoiceService = (): VoiceService | null => {
     unsubscribeContextEvents = null;
     unsubscribeContextSnapshots?.();
     unsubscribeContextSnapshots = null;
+    unsubscribeWorkflowEvents?.();
+    unsubscribeWorkflowEvents = null;
+    unsubscribeRuntimeSnapshots?.();
+    unsubscribeRuntimeSnapshots = null;
+    unsubscribeRuntimeTasks?.();
+    unsubscribeRuntimeTasks = null;
+    if (runtimeHeartbeatTimer) clearInterval(runtimeHeartbeatTimer);
+    runtimeHeartbeatTimer = null;
+    unsubscribeAutonomyProposals?.();
+    unsubscribeAutonomyProposals = null;
+    unsubscribeCapabilityProposals?.();
+    unsubscribeCapabilityProposals = null;
+    toolMatrix?.router.setExecutionScheduler(null);
+    taskStackProvider = null;
+    scheduledFastTools?.dispose();
+    orchestrationRuntime?.dispose();
+    orchestrationRuntime = null;
+    if (managedController !== controller) managedController.dispose();
+    if (managedCodingAgent instanceof ScheduledCodingAgent) {
+      managedCodingAgent.dispose();
+    }
     fastToolMatrix?.dispose();
+    fastToolMatrix = null;
     systemState.stop();
     brain.dispose();
     service = null;

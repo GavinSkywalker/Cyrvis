@@ -57,6 +57,19 @@ Windows / macOS / Linux
 | 运行状态   | 进程、PID、标题、内存，可见窗口                                             |
 | 动态能力   | software.launch、steam.launch、storage.status、power.status 等              |
 
+Windows 默认启用常驻运行态观察器，每 500ms 检查进程、窗口和前台状态的语义
+变化，并把变化直接写入 `SystemStateStore`。内存数值自身的波动不会触发刷新，
+安装应用、Steam、磁盘、电池和服务仍保持低频全量扫描。
+
+```env
+CYRVIS_RUNTIME_MONITOR=1
+CYRVIS_RUNTIME_MONITOR_INTERVAL_MS=500
+```
+
+启用统一运行时后，文件观察 Provider 默认监控桌面、下载、文档和当前工作区，
+使用文件事件唤醒并在 2 秒周期内刷新直属文件元数据。文件内容和敏感路径不会
+自动进入模型上下文。
+
 不会采集密码、Token、Cookie、浏览器历史、键盘输入、聊天内容、私钥或
 凭据文件。
 
@@ -65,14 +78,14 @@ Windows / macOS / Linux
 | 数据                             | 默认策略                         |
 | -------------------------------- | -------------------------------- |
 | 前台窗口                         | Windows 原生前台事件，轮询兜底   |
-| 进程/窗口                        | 每 10 秒增量刷新                 |
+| 进程/窗口                        | 常驻观察器 500ms，周期扫描兜底   |
 | 已安装应用、Steam 库、磁盘、电池 | 启动全扫，每 10 分钟刷新         |
 | 工具读取                         | 优先使用缓存；缓存过期时按需刷新 |
 
 配置：
 
 ```env
-CYRVIS_SYSTEM_RUNTIME_REFRESH_MS=10000
+CYRVIS_SYSTEM_RUNTIME_REFRESH_MS=30000
 CYRVIS_SYSTEM_FULL_REFRESH_MS=600000
 CYRVIS_FOREGROUND_REFRESH_MS=2000
 CYRVIS_NATIVE_FOREGROUND_EVENTS=1
@@ -182,6 +195,9 @@ Start Apps 启动目标
 | 用户查进度 | 确定性返回当前步骤和最后摘要                 |
 
 模型已经产生回复时，开始确认定时器会被取消，避免双重播报。
+
+编码、工作流和云端 PPT 等长程任务同样必须主动播报关键进度。桌宠窗口会同步
+显示活动任务栈，包括任务名称、状态和最近动作；打开设置页时桌宠保持可见。
 
 ## 8. 验证
 

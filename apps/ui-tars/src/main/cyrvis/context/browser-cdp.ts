@@ -87,6 +87,26 @@ export const normalizeBrowserTabs = (value: unknown): BrowserTab[] =>
       ...(typeof tab.active === 'boolean' ? { active: tab.active } : {}),
     }));
 
+const normalizeTabQuery = (value: string): string =>
+  value
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+
+export const matchBrowserTabs = (
+  tabs: BrowserTab[],
+  query: string,
+): BrowserTab[] => {
+  const wanted = normalizeTabQuery(query);
+  if (!wanted) return [];
+  return tabs.filter((tab) => {
+    const title = normalizeTabQuery(tab.title);
+    const url = normalizeTabQuery(tab.url);
+    return title.includes(wanted) || url.includes(wanted);
+  });
+};
+
 export const listBrowserTabs = async (
   options: BrowserCdpOptions = {},
   signal?: AbortSignal,
@@ -118,10 +138,23 @@ export const closeBrowserTab = async (
   await browserRequest(options, `/json/close/${encodeURIComponent(tabId)}`);
 };
 
+export const resolveBrowserTab = async (
+  query: string,
+  options: BrowserCdpOptions = {},
+  signal?: AbortSignal,
+): Promise<BrowserTab | null> => {
+  const tabs = await listBrowserTabs(options, signal);
+  const matches = matchBrowserTabs(tabs, query);
+  if (matches.length > 1) {
+    throw new Error(`Browser tab target is ambiguous: ${query}`);
+  }
+  return matches[0] || null;
+};
+
 export const waitForBrowserTabMissing = async (
   tabId: string,
   options: BrowserCdpOptions = {},
-  timeoutMs = 4_000,
+  timeoutMs = 2_000,
 ): Promise<boolean> => {
   const deadline = Date.now() + Math.max(250, timeoutMs);
   let lastError: unknown;

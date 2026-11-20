@@ -301,7 +301,11 @@ export class IntakeEngine {
     const pending = this.session.slots.filter(
       (slot) => !slotComplete(this.session!, slot),
     );
-    return pending.find((slot) => slotRequired(slot)) || pending[0] || null;
+    return (
+      pending.find((slot) => slotRequired(slot)) ||
+      pending.find((slot) => slot.ask !== false) ||
+      null
+    );
   }
 
   private resolveChoice(

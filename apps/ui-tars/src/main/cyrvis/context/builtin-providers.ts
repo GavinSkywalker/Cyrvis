@@ -9,6 +9,7 @@ import {
   listBrowserTabs,
   normalizeBrowserTabs,
   openBrowserTab,
+  resolveBrowserTab,
   waitForBrowserTabMissing,
   type BrowserCdpOptions,
 } from './browser-cdp';
@@ -312,7 +313,8 @@ export const createBrowserTools = (
   {
     name: 'browser.close_tab',
     domain: 'network',
-    description: 'Close a browser tab by DevTools target ID.',
+    description:
+      'Close a browser tab by DevTools target ID or by a title/URL query.',
     risk: 'medium',
     capability: {
       providerId: 'browser-debug',
@@ -325,26 +327,36 @@ export const createBrowserTools = (
     },
     inputSchema: {
       type: 'object',
-      properties: { tabId: { type: 'string' } },
-      required: ['tabId'],
+      properties: {
+        tabId: { type: 'string' },
+        query: { type: 'string' },
+      },
+      required: [],
       additionalProperties: false,
     },
     prepare: (input) => {
       const tabId = text(input, 'tabId').trim();
-      if (!tabId) {
-        throw new Error('tabId is required.');
+      const query = text(input, 'query').trim();
+      if (!tabId && !query) {
+        throw new Error('tabId or query is required.');
       }
-      return { tabId };
+      return { tabId, query };
     },
-    requiresConfirmation: () => '关闭浏览器标签页可能丢失未保存内容。',
     async execute(args) {
       try {
-        await closeBrowserTab(String(args.tabId), options);
-        const verified = await waitForBrowserTabMissing(
-          String(args.tabId),
-          options,
-          4_000,
-        );
+        const query = String(args.query || '').trim();
+        const tab = query ? await resolveBrowserTab(query, options) : null;
+        if (query && !tab) {
+          return failure(
+            'browser.close_tab',
+            `没有找到网页：${query}`,
+            'BROWSER_TAB_NOT_FOUND',
+            `No browser tab matched ${query}.`,
+          );
+        }
+        const tabId = String(args.tabId || tab?.id || '');
+        await closeBrowserTab(tabId, options);
+        const verified = await waitForBrowserTabMissing(tabId, options, 2_000);
         if (!verified) {
           return failure(
             'browser.close_tab',
@@ -354,7 +366,8 @@ export const createBrowserTools = (
           );
         }
         return success('browser.close_tab', '已关闭目标浏览器标签页。', {
-          tabId: args.tabId,
+          tabId,
+          title: tab?.title || '',
           verification: { kind: 'tool_result' },
         });
       } catch (error) {

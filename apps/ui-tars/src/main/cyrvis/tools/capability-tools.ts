@@ -21,6 +21,9 @@ const number = (value: unknown, fallback: number, maximum: number): number =>
     ? Math.max(1, Math.min(maximum, Math.floor(value)))
     : fallback;
 
+const boolean = (value: unknown, fallback = false): boolean =>
+  typeof value === 'boolean' ? value : fallback;
+
 const availabilityLabel = (capability: CapabilitySearchResult): string => {
   if (capability.availability === 'available') {
     return '可用';
@@ -136,6 +139,53 @@ export const createCapabilityTools = (
     },
   },
   {
+    name: 'capability.route',
+    domain: 'capability',
+    description:
+      'Rank available capabilities for a task using semantic match, availability, historical success, expected latency, cost, and risk. Returns an explainable local/remote/API/GUI-capable provider route.',
+    risk: 'low',
+    capability: {
+      providerId: 'capability',
+      tier: 0,
+      activation: 'always',
+      priority: 98,
+      tags: ['capability', 'route', 'fallback', '能力', '路由', '降级'],
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string' },
+        limit: { type: 'number', minimum: 1, maximum: 20 },
+        maxRisk: {
+          type: 'string',
+          enum: ['low', 'medium', 'high'],
+        },
+      },
+      required: ['query'],
+      additionalProperties: false,
+    },
+    prepare: (input) => ({
+      query: text(input, 'query'),
+      limit: number(input.limit, 5, 20),
+      maxRisk: ['low', 'medium', 'high'].includes(String(input.maxRisk))
+        ? (String(input.maxRisk) as 'low' | 'medium' | 'high')
+        : 'high',
+    }),
+    async execute(args) {
+      const candidates = broker.route(String(args.query), {
+        limit: Number(args.limit),
+        maxRisk: args.maxRisk as 'low' | 'medium' | 'high',
+      });
+      return success(
+        'capability.route',
+        candidates.length
+          ? `已为任务选择 ${candidates.length} 个候选能力，首选 ${candidates[0].capability.id}。`
+          : '没有找到满足约束的能力。',
+        { candidates },
+      );
+    },
+  },
+  {
     name: 'capability.describe',
     domain: 'capability',
     description:
@@ -180,7 +230,7 @@ export const createCapabilityTools = (
     name: 'capability.invoke',
     domain: 'capability',
     description:
-      'Invoke any available CYRVIS capability by tool ID after validating its schema, state, risk, path policy, and confirmation requirements.',
+      'Invoke any available CYRVIS capability by tool ID after validating its schema and state. An explicit user request is sufficient authorization.',
     risk: 'low',
     capability: {
       providerId: 'capability',
@@ -197,6 +247,7 @@ export const createCapabilityTools = (
           type: 'object',
           additionalProperties: true,
         },
+        allowFallbacks: { type: 'boolean' },
       },
       required: ['toolId', 'arguments'],
       additionalProperties: false,
@@ -209,11 +260,13 @@ export const createCapabilityTools = (
         !Array.isArray(input.arguments)
           ? (input.arguments as Record<string, unknown>)
           : {},
+      allowFallbacks: boolean(input.allowFallbacks),
     }),
     async execute(args) {
       return broker.invoke(
         String(args.toolId),
         args.arguments as Record<string, unknown>,
+        { allowFallbacks: args.allowFallbacks === true },
       );
     },
   },

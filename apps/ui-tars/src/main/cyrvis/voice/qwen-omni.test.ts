@@ -95,6 +95,37 @@ const sent = (socket: FakeWebSocket) =>
   socket.send.mock.calls.map(([data]) => JSON.parse(data));
 
 describe('Qwen companion voices', () => {
+  it('keeps exact workflow speech and screenshot IDs separate in the shared FIFO queue', async () => {
+    const { provider, callbacks } = setup('qwen-audio-3.0-realtime-plus');
+    const connecting = provider.connect();
+    sockets[0].ready();
+    await connecting;
+    receive(sockets[0], {
+      type: 'conversation.item.created',
+      item: { id: 'user-a', role: 'user' },
+    });
+    provider.cancelResponse();
+    provider.speakExact('机票比较已完成。');
+    provider.speak('这是新的封面。', 'shot-next');
+    await vi.advanceTimersByTimeAsync(401);
+    expect(
+      sent(sockets[0]).some(
+        (item) =>
+          item.type === 'conversation.item.delete' && item.item_id === 'user-a',
+      ),
+    ).toBe(true);
+    receive(sockets[0], { type: 'response.created' });
+    expect(callbacks.onResponseStarted).toHaveBeenLastCalledWith(undefined);
+    receive(sockets[0], {
+      type: 'response.done',
+      response: { status: 'completed' },
+    });
+    receive(sockets[0], { type: 'response.created' });
+    expect(callbacks.onResponseStarted).toHaveBeenLastCalledWith({
+      readoutId: 'shot-next',
+    });
+  });
+
   it('records one assistant turn when both text and audio transcript events are emitted', async () => {
     const { provider, callbacks } = setup('qwen-audio-3.0-realtime-plus');
     const connected = provider.connect();
@@ -206,7 +237,7 @@ describe('Qwen companion voices', () => {
       type: 'message',
       role: 'user',
       content: [
-        { type: 'input_text', text: expect.stringContaining('只朗读') },
+        { type: 'input_text', text: expect.stringContaining('逐字完整朗读') },
       ],
     });
     expect(messages[index + 1].type).toBe('response.create');

@@ -4,7 +4,7 @@
  */
 import type { IntakeSlotSpec } from '../intake/types';
 import { rankOffers } from '../offers/compare';
-import type { Offer, RankedOffer } from '../offers/types';
+import type { Offer, RankedOffer, RankWeights } from '../offers/types';
 
 export const TRAVEL_FLIGHT_DOMAIN = 'travel_flight';
 
@@ -29,7 +29,19 @@ export interface FlightComparison {
   best: RankedOffer | null;
   reasons: string[];
   returnDate: string | null;
+  source?: 'demo' | 'google_flights';
+  searchUrl?: string;
 }
+
+/** Live offers have no baggage/refund metadata, so only price/route count. */
+export const LIVE_RANK_WEIGHTS: RankWeights = {
+  price: 0.45,
+  direct: 0.2,
+  baggage: 0,
+  refundable: 0,
+  convenience: 0.05,
+  duration: 0.3,
+};
 
 const CHINESE_NUMBERS: Record<string, number> = {
   一: 1,
@@ -82,7 +94,8 @@ const chineseNumber = (value: string): number => {
 const cleanCity = (value: string): string =>
   value
     .replace(/^(?:一趟|一张|一个|去|到|往|飞往|飞)/, '')
-    .replace(/(?:的|市|吧|呀|啊|呢|了)$/g, '')
+    .replace(/(?:的)?(?:单程|往返|来回)$/u, '')
+    .replace(/(?:的|市|吧|呀|啊|呢|了)+$/u, '')
     .trim();
 
 const looksLikeQuestion = (value: string): boolean =>
@@ -95,8 +108,8 @@ export const parseTravelDestination = (
   const raw = text.trim();
   if (!raw) return undefined;
   const patterns = [
-    /(?:买|订|查|比价)?(?:一张)?(?:去|到|飞往)([一-龥]{2,10}?)(?:的)?(?:机票|航班|飞机票)/,
-    /(?:去|到|飞往)([一-龥]{2,10}?)(?:玩|旅游|旅行|度假|的机票)/,
+    /(?:买|订|查|比价)?(?:一张)?(?:去|到|飞往)([一-龥]{2,10}?)(?:的)?(?:单程|往返|来回)?(?:机票|航班|飞机票)/,
+    /(?:去|到|飞往)([一-龥]{2,10}?)(?:的)?(?:单程|往返|来回)?(?:玩|旅游|旅行|度假|的机票)/,
     /(?:去|到|飞往)([一-龥]{2,10})$/,
     /([一-龥]{2,8})(?:的)?(?:机票|航班|飞机票)/,
     /(?:就|选|定|要)([一-龥]{2,8})(?:吧|了|呀)?$/,
@@ -351,6 +364,30 @@ export const compareFlights = (input: FlightSearchInput): FlightComparison => {
     best: result.best,
     reasons: result.reasons,
     returnDate,
+    source: 'demo',
+  };
+};
+
+/**
+ * Rank real offers returned by a live provider (currently Google Flights).
+ * Do not reuse the demo formatter: live data has no baggage/refund fields and
+ * must never be described as five OTA quotes.
+ */
+export const compareLiveFlights = (
+  input: FlightSearchInput,
+  offers: FlightOffer[],
+  searchUrl?: string,
+): FlightComparison => {
+  const result = rankOffers(offers, LIVE_RANK_WEIGHTS);
+  return {
+    input,
+    offers,
+    ranked: result.ranked,
+    best: result.best,
+    reasons: result.reasons,
+    returnDate: null,
+    source: 'google_flights',
+    searchUrl,
   };
 };
 
@@ -376,6 +413,93 @@ export const formatFlightComparison = (
       ? `往返${comparison.input.durationDays}天`
       : '单程';
   return `我比了 ${comparison.ranked.length} 个平台。前三名：${top}。最低是${best.provider} ${best.totalPrice} 元，${tripLabel}，${direct}${baggage}、${refund}。${savings ? `${savings}，` : ''}我建议选${best.provider}。`;
+};
+
+const formatDuration = (minutes?: number): string => {
+  if (!minutes || minutes <= 0) return '';
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return `${hours ? `${hours}小时` : ''}${rest ? `${rest}分` : ''}`;
+};
+
+export const formatLiveFlightComparison = (
+  comparison: FlightComparison,
+): string => {
+  const best = comparison.best;
+  if (!best) {
+    return '实时航班暂时没有查到有价格的选项，我打开搜索页给你看。';
+  }
+  const sourceOf = (offer: { metadata?: Record<string, unknown> }): string =>
+    String(offer.metadata?.sourceLabel || 'Google Flights');
+  const sourceLabels = [
+    ...new Set(comparison.offers.map((offer) => sourceOf(offer))),
+  ];
+  const sourceText =
+    sourceLabels.length > 1
+      ? `我查了 ${sourceLabels.join('、')} 的实时结果`
+      : `我查了 ${sourceLabels[0] || 'Google Flights'} 的实时结果`;
+  const detail = (offer: RankedOffer): string => {
+    const transfer = offer.conditions.direct
+      ? '直飞'
+      : `中转${offer.conditions.transferCount || 1}次`;
+    const time = offer.conditions.departureTime
+      ? `，${offer.conditions.departureTime}出发`
+      : '';
+    const duration = formatDuration(offer.conditions.durationMinutes);
+    return `${sourceOf(offer)} · ${offer.provider} ${offer.totalPrice} 元${time}，${transfer}${
+      duration ? `，约${duration}` : ''
+    }`;
+  };
+  const groups: Array<{
+    sourceLabel: string;
+    provider: string;
+    price: number;
+    times: string[];
+  }> = [];
+  const byPrice = [...comparison.ranked].sort(
+    (a, b) => a.totalPrice - b.totalPrice || a.score - b.score,
+  );
+  for (const offer of byPrice) {
+    let group = groups.find(
+      (item) =>
+        item.sourceLabel === sourceOf(offer) &&
+        item.provider === offer.provider &&
+        item.price === offer.totalPrice,
+    );
+    if (!group) {
+      if (groups.length >= 3) continue;
+      group = {
+        sourceLabel: sourceOf(offer),
+        provider: offer.provider,
+        price: offer.totalPrice,
+        times: [],
+      };
+      groups.push(group);
+    }
+    const time = offer.conditions.departureTime;
+    if (time && !group.times.includes(time) && group.times.length < 2) {
+      group.times.push(time);
+    }
+  }
+  const top = groups
+    .map(
+      (group) =>
+        `${group.sourceLabel} · ${group.provider}${group.price}元${
+          group.times.length ? `（${group.times.join('、')}）` : ''
+        }`,
+    )
+    .join('、');
+  const cheapest = [...comparison.ranked].sort(
+    (a, b) => a.totalPrice - b.totalPrice || a.score - b.score,
+  )[0];
+  const tripLabel =
+    comparison.input.durationDays && comparison.input.durationDays > 0
+      ? `往返${comparison.input.durationDays}天`
+      : '单程';
+  if (cheapest.id === best.id) {
+    return `${sourceText}，找到 ${comparison.offers.length} 个有价格的${tripLabel}航班。前三名：${top}。最低价和综合最优都是${detail(best)}。我建议选它。价格会实时变化，具体以页面为准。`;
+  }
+  return `${sourceText}，找到 ${comparison.offers.length} 个有价格的${tripLabel}航班。前三名：${top}。最便宜的是${detail(cheapest)}；综合价格和时间，我建议选${detail(best)}。价格会实时变化，具体以页面为准。`;
 };
 
 export const TRAVEL_FLIGHT_SLOTS: IntakeSlotSpec[] = [
@@ -409,7 +533,12 @@ export const TRAVEL_FLIGHT_SLOTS: IntakeSlotSpec[] = [
     question: '打算待几天？',
     kind: 'duration',
     priority: 4,
-    defaultValue: '3',
+    // Optional: do not force the user to say "单程". If they volunteer
+    // "待五天"/"往返", the parser still fills it; otherwise default to a
+    // one-way comparison so all three sources can be queried.
+    required: false,
+    ask: false,
+    defaultValue: '0',
     parse: (text, context) => {
       // ASR commonly hears "单程" as "单纯" at the end of a sentence.
       if (context.expected && /单纯/.test(text)) return 0;

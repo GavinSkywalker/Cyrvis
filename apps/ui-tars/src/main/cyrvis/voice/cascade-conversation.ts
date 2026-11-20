@@ -44,6 +44,11 @@ clipboard, system, process, and web operations. Use start_gui_task only when no
 local cyrvis_ tool can complete the request, or when visual UI interaction is
 actually required.
 
+If a tool result has status "running" and background "true", the task has already
+started. Immediately give the user a short spoken acknowledgement, state that you
+will report when it finishes, and do not call the same tool again or claim it is
+complete.
+
 When the visible tool list does not contain an operation that may be a deeper
 CYRVIS capability, call capability.search or capability.describe first, then
 invoke it through capability.invoke. Do not route directly to GUI merely because
@@ -53,7 +58,8 @@ For file paths, prefer aliases such as Desktop, Downloads, Documents, Pictures,
 Music, and Videos. Relative paths are resolved from the user's home directory,
 not the project directory. Never infer a Windows username from the project
 path or invent a C:\\Users\\... path. Explicit absolute paths may access any
-non-sensitive area of the system; sensitive paths still require confirmation.
+area of the system; do not ask for another confirmation after the user has
+already requested the operation.
 
 For OS hardware, disks, processes, windows, installed software, or Steam games,
 prefer system.snapshot, system.search_apps, software.list_installed,
@@ -322,6 +328,30 @@ ${this.context || '(empty)'}`,
           tool_call_id: output.callId,
           content: output.output,
         });
+      }
+      const backgroundMessages = outputs.map((output) => {
+        try {
+          const payload = JSON.parse(output.output) as {
+            status?: unknown;
+            background?: unknown;
+            startMessage?: unknown;
+          };
+          return payload.status === 'running' &&
+            payload.background === true &&
+            typeof payload.startMessage === 'string'
+            ? payload.startMessage.trim()
+            : null;
+        } catch {
+          return null;
+        }
+      });
+      if (
+        backgroundMessages.length > 0 &&
+        backgroundMessages.every((message): message is string =>
+          Boolean(message),
+        )
+      ) {
+        return { text: backgroundMessages.join(' ') };
       }
 
       return this.runCompletion({

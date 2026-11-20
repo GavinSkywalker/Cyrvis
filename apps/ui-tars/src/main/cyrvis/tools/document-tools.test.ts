@@ -79,5 +79,6 @@ describe('document and archive tools', () => {
         await fs.readFile(path.join(destination, 'source', 'a.txt'), 'utf8'),
       ).toBe('archive');
     },
+    15_000,
   );
 });

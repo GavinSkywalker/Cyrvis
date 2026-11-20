@@ -1,10 +1,12 @@
 import type { SystemStateSnapshot } from '../../system/types';
+import type { DesktopHost } from '../../tools/types';
 import type { ResourceDescriptor, UserContextSnapshot } from '../types';
 
 export interface PerceptionContext {
   now: number;
   system: SystemStateSnapshot | null;
   user: UserContextSnapshot;
+  desktop?: DesktopHost;
 }
 
 export interface PerceptionProvider {

@@ -157,6 +157,7 @@ const config: ForgeConfig = {
     extraResource: [
       './resources/app-update.yml',
       '../../scripts/cyrvis/foreground-events.ps1',
+      '../../scripts/cyrvis/system-runtime-events.ps1',
     ],
     asar: {
       unpack,

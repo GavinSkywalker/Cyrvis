@@ -81,6 +81,8 @@ export const createSystemStateTools = (
         {
           capabilities: snapshot.capabilities,
           capturedAt: snapshot.capturedAt,
+          runtimeObservedAt: snapshot.runtimeObservedAt,
+          fullObservedAt: snapshot.fullObservedAt,
         },
       );
     },
@@ -266,6 +268,8 @@ export const createSystemStateTools = (
       const snapshot = await store.refresh(Boolean(args.full));
       return ok('system.refresh', '系统状态已刷新。', {
         capturedAt: snapshot.capturedAt,
+        runtimeObservedAt: snapshot.runtimeObservedAt,
+        fullObservedAt: snapshot.fullObservedAt,
         applications: snapshot.installedApplications.length,
         steamGames: snapshot.steamGames.length,
         capabilities: snapshot.capabilities,
