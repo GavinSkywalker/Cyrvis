@@ -451,7 +451,7 @@ export const CYRVIS_VOICE_TOOLS: QwenToolDefinition[] = [
     function: {
       name: 'travel_search',
       description:
-        'Search travel-related info for the current plan (flights, hotels, attractions). Include destination month/festival context when relevant.',
+        'Search travel-related info for the current plan (hotels, attractions). Never use for flight prices or schedules: the flight intake compares offers deterministically after the user asks to buy a ticket. Include destination month/festival context when relevant.',
       parameters: {
         type: 'object',
         properties: {

@@ -723,13 +723,12 @@ export function useVoiceAudio() {
     if (mediaStreamRef.current) {
       return;
     }
-    // Headset mode uses the raw microphone so KWS can hear a short "停一下".
-    // Speaker mode keeps AEC to reduce the assistant's own TTS echo. The
-    // raw-speaker trial caused self-interruption on TTS echo (00:05), so it
-    // was rolled back.
-    const stream = await openMicrophoneStream(
-      audioModeRef.current === 'speaker',
-    );
+    // Always keep AEC on the main microphone. The saved audio mode is loaded
+    // asynchronously, so audioModeRef may still be the initial "headset" when
+    // capture starts; gating AEC on that value opened speaker mode without
+    // echo cancellation and let TTS echo trigger the immediate energy barge.
+    // Short stop words are handled by the dedicated raw KWS stream below.
+    const stream = await openMicrophoneStream(true);
     mediaStreamRef.current = stream;
     const audioContext = new AudioContext();
     captureContextRef.current = audioContext;
@@ -739,6 +738,7 @@ export function useVoiceAudio() {
       label: captureTrack?.label || '',
       deviceId: captureTrack?.getSettings().deviceId || '',
       sampleRate: audioContext.sampleRate,
+      echoCancellation: captureTrack?.getSettings().echoCancellation,
     });
     await audioContext.resume();
     const source = audioContext.createMediaStreamSource(stream);

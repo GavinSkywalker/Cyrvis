@@ -594,6 +594,10 @@ export class CascadeVoiceProvider implements InteractiveVoiceProvider {
     this.finishUtterance();
   }
 
+  speakExact(text: string): void {
+    this.speak(text);
+  }
+
   speak(text: string, readoutId?: string): void {
     if (readoutId) this.callbacks.onReadoutState?.(readoutId, 'queued');
     if (readoutId && !this.connected) {

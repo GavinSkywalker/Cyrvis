@@ -24,6 +24,9 @@ import { buildSearchUrl, defaultSearchEngine } from './navigation';
 import { resolveSite, buildSiteSearchUrl } from './site-registry';
 import { NAVIGATION_TOOL_ALIASES } from './voice/tool-surface';
 import { classifyIntent, isExplicitChat } from './intent-gate';
+import { IntakeEngine } from './intake/engine';
+import { IntakeScheduler } from './intake/scheduler';
+import type { IntakeSession, IntakeSlotSpec } from './intake/types';
 import { ProactivityPolicy, type ProactivityOptions } from './proactivity';
 import { classifyVoiceIntent, type VoiceIntentDecision } from './search-intent';
 import { TaskConversationCoordinator } from './task-conversation';
@@ -42,6 +45,17 @@ import {
   probeTravelHighlights,
   searchTravelInfo,
 } from './travel/travel-search';
+import {
+  TRAVEL_FLIGHT_DOMAIN,
+  TRAVEL_FLIGHT_SLOTS,
+  compareFlights,
+  formatFlightComparison,
+  isTravelFlightIntent,
+  parseTravelDate,
+  parseTravelDestination,
+  parseTravelDurationDays,
+  parseTravelOrigin,
+} from './travel/travel-flight';
 import type { ControllerEvent } from './types';
 import {
   SENSITIVE_CONFIRMATION_PROMPT,
@@ -142,6 +156,10 @@ export interface VoiceBrainOptions {
   classifyPendingIntent?: (
     input: PendingIntentInput,
   ) => Promise<PendingIntentDecision>;
+  /** Used by the travel demo to open the recommended booking page. */
+  openExternal?: (url: string) => Promise<void>;
+  /** Test hook: override the estimated wait before opening the booking page. */
+  travelBookingOpenDelayMs?: number;
 }
 
 const DEFAULT_WAKE_PATTERNS: RegExp[] = [
@@ -274,6 +292,9 @@ export class VoiceBrain {
   private codingFileNames = new Set<string>();
   private lastCodingProgressAt = 0;
   private lastCodingProgressMessage = '';
+  private readonly intakeEngine = new IntakeEngine();
+  private readonly intakeScheduler = new IntakeScheduler();
+  private travelFlightCompleting = false;
   private lastHardStopAt = 0;
   private navigationExecutions = new Set<string>();
   private readonly unsubscribeController: () => void;
@@ -563,7 +584,7 @@ export class VoiceBrain {
    * mishears "停". Cancel the current response and keep the model silent for
    * a short window so it cannot answer with "好的，已暂停…".
    */
-  markUserStop(): void {
+  markUserStop(preserveIntake = false): void {
     this.readoutGuardUntil = 0;
     this.inspectionGeneration++;
     this.gazeToolTurn = null;
@@ -575,6 +596,9 @@ export class VoiceBrain {
     this.options.snoozeProactiveGaze?.(8_000);
     if (this.gazeSuggestion) {
       this.gazeSuggestion = null;
+    }
+    if (!preserveIntake) {
+      this.clearTravelFlightIntake();
     }
     // Qwen can start a follow-up response 2-3s after the barge audio was
     // cancelled. 3s covers the observed 2.3s follow-up while still allowing
@@ -590,13 +614,14 @@ export class VoiceBrain {
    * Deterministic barge stop. Do not wait for ASR: a confirmed barge may be a
    * short "停" that the model hears as empty or something else several seconds
    * later. Pause the GUI task and keep the assistant silent.
+   *
+   * An energy barge is usually the user starting to answer the assistant's
+   * question (e.g. "北京出发" while it asks for the origin), so it must stop
+   * the speech without discarding an active intake. A KWS/global-shortcut
+   * barge is an explicit stop and still clears the intake.
    */
-  handleBargeStop(_hardStop = false): void {
-    // Any confirmed barge is a stop, not a pause. KWS recall is not reliable
-    // enough on this Bluetooth/headset path; depending on it left tasks
-    // running after several "停一下" attempts. Cancel the task immediately
-    // when the user starts speaking over the assistant.
-    this.handleStopCommand();
+  handleBargeStop(hardStop = false): void {
+    this.handleStopCommand(!hardStop);
   }
 
   sleep(): void {
@@ -622,6 +647,7 @@ export class VoiceBrain {
       clearTimeout(this.speakWatchdog);
       this.speakWatchdog = null;
     }
+    this.clearTravelFlightIntake();
     this.unsubscribeController();
     this.proactivity.reset();
     this.provider.close();
@@ -640,6 +666,7 @@ export class VoiceBrain {
         this.notifyState();
       },
       onSpeechStarted: () => {
+        this.intakeScheduler.cancelPending();
         if (!this.userSpeaking) {
           this.speechTurn++;
           this.speechAwaitingTranscript = true;
@@ -1127,6 +1154,11 @@ export class VoiceBrain {
       return true;
     }
 
+    this.rememberTravelSelection(text);
+    if (this.handleTravelFlightCommand(text)) {
+      return true;
+    }
+
     // Code-file creation/execution is deterministic enough to route before
     // the model can mistake it for a Notepad/desktop task.
     if (this.handleCodingCommand(text)) {
@@ -1239,6 +1271,211 @@ export class VoiceBrain {
     }
     this.speak(this.taskConversation.describeStatus());
     return true;
+  }
+
+  /**
+   * Capture “就三亚吧” when the assistant just listed that city. The model can
+   * still call travel_update_plan; this only preserves context for a following
+   * “去这/买机票” turn if the tool call is missed.
+   */
+  private rememberTravelSelection(text: string): void {
+    if (this.intakeEngine.getSession()) return;
+    const match = text
+      .trim()
+      .match(/^(?:就|选|要|定)([一-龥]{2,8}?)(?:吧|了|呀)?$/);
+    if (!match?.[1] || !this.lastAssistantText.includes(match[1])) return;
+    travelPlanner.updateFramework({
+      destination: match[1],
+      userText: text,
+    });
+  }
+
+  private handleTravelFlightCommand(text: string): boolean {
+    const active = this.intakeEngine.getSession();
+    if (active?.domain === TRAVEL_FLIGHT_DOMAIN) {
+      this.intakeScheduler.cancelPending();
+      const turn = this.intakeEngine.updateFromText(text);
+      if (turn && turn.filled.length > 0) {
+        if (turn.ready) {
+          // Do not cancel the model's acknowledgement here. Canceling it and
+          // then sending the comparison as a proactive line made the model
+          // answer the stale slot turn instead of reading the comparison, so
+          // the browser opened without the price summary being spoken.
+          // Let the acknowledgement finish; the comparison is queued behind it.
+          void this.completeTravelFlight();
+          return true;
+        }
+        if (turn.question) {
+          this.speakExact(`收到。${turn.question}`);
+          if (turn.nextSlot) {
+            this.scheduleIntakeReminder(turn.session, turn.nextSlot);
+          }
+          return true;
+        }
+      }
+
+      const current = this.intakeEngine.getCurrentSlot();
+      const newCommand =
+        /(打开|搜索|播放|写|代码|编码|任务|文件|天气|新闻|介绍|讲个|聊|暂停|继续)/.test(
+          text,
+        );
+      if (newCommand || text.trim().length > 18) {
+        this.provider.cancelResponse();
+        this.clearTravelFlightIntake();
+        return false;
+      }
+      if (current) {
+        this.speakExact(`还在等你补充${current.label}。${current.question}`);
+        this.scheduleIntakeReminder(active, current);
+        return true;
+      }
+      return false;
+    }
+
+    if (!isTravelFlightIntent(text)) {
+      return false;
+    }
+    this.provider.cancelResponse();
+
+    const framework = travelPlanner.getSnapshot().framework;
+    const destination = parseTravelDestination(text) || framework.destination;
+    const origin = parseTravelOrigin(text) || framework.origin;
+    // The planner already has what the user said earlier (e.g. "从北京",
+    // "23号"). Reuse it instead of asking the same question again; a bare
+    // day such as "23号" is resolved against the current month.
+    const departDate =
+      parseTravelDate(text) ||
+      (framework.startDate ? parseTravelDate(framework.startDate) : undefined);
+    const durationDays = parseTravelDurationDays(text);
+    if (destination || origin || departDate) {
+      travelPlanner.updateFramework({
+        destination,
+        origin,
+        startDate: departDate,
+        transport: '机票',
+        userText: text,
+      });
+    }
+
+    this.intakeEngine.start(TRAVEL_FLIGHT_DOMAIN, text, TRAVEL_FLIGHT_SLOTS, {
+      destination,
+      origin,
+      departDate,
+      durationDays,
+    });
+    const session = this.intakeEngine.getSession();
+    if (!session) return false;
+    if (session.status === 'ready') {
+      void this.completeTravelFlight();
+      return true;
+    }
+    const next = this.intakeEngine.next();
+    if (!next) {
+      this.clearTravelFlightIntake();
+      return false;
+    }
+    this.speakExact(`好的，我来帮你比机票。${next.question}`);
+    this.scheduleIntakeReminder(session, next.slot);
+    return true;
+  }
+
+  private scheduleIntakeReminder(
+    session: IntakeSession,
+    slot: IntakeSlotSpec,
+  ): void {
+    const sessionId = session.id;
+    this.intakeScheduler.schedule(
+      slot.key,
+      () => {
+        const current = this.intakeEngine.getSession();
+        if (!current || current.id !== sessionId) return;
+        if (this.userStopped || !this.awake || this.userSpeaking) return;
+        this.speakExact(`还在等你补充${slot.label}。${slot.question}`);
+      },
+      () => {
+        const current = this.intakeEngine.getSession();
+        return (
+          !!current &&
+          current.id === sessionId &&
+          current.status === 'collecting' &&
+          this.awake &&
+          !this.userSpeaking &&
+          !this.ttsSpeaking
+        );
+      },
+    );
+  }
+
+  private clearTravelFlightIntake(): void {
+    this.intakeScheduler.cancelAll();
+    this.intakeEngine.cancel();
+    this.travelFlightCompleting = false;
+  }
+
+  private async completeTravelFlight(): Promise<void> {
+    if (this.travelFlightCompleting) return;
+    const session = this.intakeEngine.getSession();
+    if (!session || session.domain !== TRAVEL_FLIGHT_DOMAIN) return;
+    const origin = String(session.answers.origin || '').trim();
+    const destination = String(session.answers.destination || '').trim();
+    const departDate = String(session.answers.departDate || '').trim();
+    const durationDays = Number(session.answers.durationDays) || undefined;
+    if (!origin || !destination || !departDate) {
+      const next = this.intakeEngine.next();
+      if (next) {
+        this.speakExact(next.question);
+        this.scheduleIntakeReminder(session, next.slot);
+      }
+      return;
+    }
+
+    this.travelFlightCompleting = true;
+    try {
+      const comparison = compareFlights({
+        origin,
+        destination,
+        departDate,
+        durationDays,
+        passengers: 1,
+      });
+      const speech = formatFlightComparison(comparison);
+      this.intakeScheduler.cancelAll();
+      this.intakeEngine.complete();
+      this.taskSpeechGuardUntil =
+        Date.now() + Math.min(15_000, Math.max(3_000, speech.length * 180));
+      this.speakExact(speech);
+      const url = comparison.best?.url;
+      if (url) {
+        // The comparison is a long spoken line; opening the page after 1.2s
+        // looked like the assistant had only redirected to Qunar. Wait for the
+        // estimated speech duration (plus the acknowledgement already playing)
+        // before opening it. A stop during the speech suppresses the open.
+        const openDelay =
+          this.options.travelBookingOpenDelayMs ??
+          Math.min(30_000, Math.max(6_000, speech.length * 180 + 6_000));
+        setTimeout(() => {
+          if (this.userStopped) return;
+          void this.openTravelBooking(url);
+        }, openDelay);
+      }
+    } finally {
+      this.travelFlightCompleting = false;
+    }
+  }
+
+  private async openTravelBooking(url: string): Promise<void> {
+    try {
+      if (this.options.openExternal) {
+        await this.options.openExternal(url);
+        return;
+      }
+      const { openUrl } = await import('./desktop-actions');
+      await openUrl(url);
+    } catch (error) {
+      this.callbacks.onError?.(
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    }
   }
 
   private handleCodingCommand(text: string): boolean {
@@ -3064,7 +3301,7 @@ export class VoiceBrain {
     );
   }
 
-  private handleStopCommand(): boolean {
+  private handleStopCommand(preserveIntake = false): boolean {
     const status = this.controller.getStatus().status;
     const guiActive = [
       'starting',
@@ -3080,7 +3317,7 @@ export class VoiceBrain {
     this.pendingBargeStopAt = 0;
     this.provider.cancelResponse();
     this.provider.cancelPendingSpeech?.();
-    this.markUserStop();
+    this.markUserStop(preserveIntake);
     this.taskConversation.markStopped();
     this.lastDeterministicControl = { kind: 'cancel', at: Date.now() };
     console.info('[cyrvis voice] hard stop', {
@@ -3376,13 +3613,27 @@ export class VoiceBrain {
   }
 
   private speak(text: string, readoutId?: string): void {
+    this.say(text, false, readoutId);
+  }
+
+  /** Read deterministic workflow lines without answering a stale user turn. */
+  private speakExact(text: string): void {
+    this.say(text, true);
+  }
+
+  private say(text: string, exact: boolean, readoutId?: string): void {
     if (!this.awake) return;
     this.taskConversation.noteAssistantOutput();
     this.markUserResponseOutput();
     this.ttsSpeaking = true;
     this.proactivity.setTtsSpeaking(true);
-    if (readoutId) this.provider.speak(text, readoutId);
-    else this.provider.speak(text);
+    if (exact && this.provider.speakExact) {
+      this.provider.speakExact(text);
+    } else if (readoutId) {
+      this.provider.speak(text, readoutId);
+    } else {
+      this.provider.speak(text);
+    }
     this.notifyState();
 
     if (this.speakWatchdog) {
