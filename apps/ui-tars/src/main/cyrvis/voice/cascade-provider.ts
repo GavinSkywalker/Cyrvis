@@ -562,6 +562,10 @@ export class CascadeVoiceProvider implements InteractiveVoiceProvider {
     this.finishUtterance();
   }
 
+  speakExact(text: string): void {
+    this.speak(text);
+  }
+
   speak(text: string): void {
     const speech = cleanSpeechText(text);
     if (!speech) {

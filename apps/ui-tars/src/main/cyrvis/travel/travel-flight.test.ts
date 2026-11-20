@@ -27,9 +27,13 @@ describe('travel flight slots', () => {
     expect(parseTravelDate('下周五', now)).toBe('2026-11-27');
     expect(parseTravelDate('11月27日', now)).toBe('2026-11-27');
     expect(parseTravelDate('明天', now)).toBe('2026-11-21');
+    // A bare day means the current month unless it has already passed.
+    expect(parseTravelDate('23号', now)).toBe('2026-11-23');
+    expect(parseTravelDate('15号', now)).toBe('2026-12-15');
     expect(parseTravelDurationDays('待五天')).toBe(5);
     expect(parseTravelDurationDays('3天两晚')).toBe(3);
     expect(parseTravelDurationDays('一周')).toBe(7);
+    expect(parseTravelDurationDays('单程')).toBe(0);
   });
 
   it('distinguishes a concrete flight purchase from a generic search', () => {
@@ -68,5 +72,14 @@ describe('flight comparison', () => {
     expect(speech).toContain(comparison.best!.provider);
     expect(speech).toContain('我建议选');
     expect(speech).toContain('往返5天');
+  });
+
+  it('treats duration 0 as a one-way trip', () => {
+    const comparison = compareFlights({ ...input, durationDays: 0 });
+    const speech = formatFlightComparison(comparison);
+
+    expect(comparison.returnDate).toBeNull();
+    expect(speech).toContain('单程');
+    expect(speech).not.toContain('往返');
   });
 });

@@ -92,6 +92,30 @@ const sent = (socket: FakeWebSocket) =>
   socket.send.mock.calls.map(([data]) => JSON.parse(data));
 
 describe('Qwen companion voices', () => {
+  it('drops the stale user turn before an exact deterministic line', async () => {
+    const { provider } = setup('qwen-audio-3.0-realtime-plus');
+    const connected = provider.connect();
+    sockets[0].ready();
+    await connected;
+
+    receive(sockets[0], {
+      type: 'conversation.item.created',
+      item: { id: 'item_user_1', role: 'user' },
+    });
+    provider.speakExact('我比了 5 个平台。');
+
+    const messages = sent(sockets[0]);
+    const deleteIndex = messages.findIndex(
+      (item) => item.type === 'conversation.item.delete',
+    );
+    const createIndex = messages.findIndex(
+      (item) => item.type === 'conversation.item.create',
+    );
+    expect(deleteIndex).toBeGreaterThanOrEqual(0);
+    expect(messages[deleteIndex].item_id).toBe('item_user_1');
+    expect(deleteIndex).toBeLessThan(createIndex);
+  });
+
   it('can speak first in a fresh Audio session by creating a read-only input before response.create', async () => {
     const { provider } = setup('qwen-audio-3.0-realtime-plus');
     const connected = provider.connect();

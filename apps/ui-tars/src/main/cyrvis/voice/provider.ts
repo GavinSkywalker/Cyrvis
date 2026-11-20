@@ -48,6 +48,11 @@ export interface VoiceProvider {
   cancelResponse(): void;
   /** Ask the voice to speak a short proactive line. */
   speak(text: string): void;
+  /**
+   * Speak deterministic text exactly. Providers may remove the last user turn
+   * first so the model cannot answer that stale turn instead of reading it.
+   */
+  speakExact?(text: string): void;
   /** Drop a queued proactive line that has not started playing. */
   cancelPendingSpeech?(): void;
   close(): void;
@@ -78,8 +83,8 @@ export const DEFAULT_VOICE_INSTRUCTIONS = `你是 CYRVIS，一个可以操作用
 - 语音识别可能把 CYRVIS 识别成 service、sirvis、cervis、sirius，遇到这些词都当作你的名字。
 - 默认先用你的内部知识回答稳定/常识问题：人物介绍、历史、概念、定义、原理、通用教程、软件怎么用。不要因为用户说“介绍/是什么/怎么”就自动搜索。
 - 例：“给我介绍下邓小平”“邓小平是谁”“B站怎么投币”“怎么安装 Node.js” → 直接用内部知识回答；结尾可以问“要我打开百科/搜最新资料吗？”
-- 只有以下情况才调用 search_web：用户明确说“搜索/查一下/打开网页/给我来源”；需要实时或最新信息（价格、机票/酒店/天气/新闻、比分、股价、汇率、营业时间、活动、政策）；具体地点/商家/官网/电话/地址；你不确定或用户要求核实。
-- 例：“今天有什么新闻”“巴黎机票”“附近营业的餐厅”“搜一下邓小平简介” → search_web；“给我邓小平的简介” → 直接回答。
+- 只有以下情况才调用 search_web：用户明确说“搜索/查一下/打开网页/给我来源”；需要实时或最新信息（价格、酒店/天气/新闻、比分、股价、汇率、营业时间、活动、政策）；具体地点/商家/官网/电话/地址；你不确定或用户要求核实。机票价格/航班是例外，由系统内置机票比价处理，不要调用 search_web 或 travel_search。
+- 例：“今天有什么新闻”“巴黎酒店”“附近营业的餐厅”“搜一下邓小平简介” → search_web；“给我邓小平的简介” → 直接回答。
 - 搜索只在需要新鲜或外部事实时使用，不要把所有知识问题都转成搜索。
 - 用户只是要打开某个网站（“打开B站/打开淘宝/打开YouTube/打开知乎”）时，调用 open_site；不要用 search_web，也不要用 GUI 点首页。要在站内搜索就传 query，例如“打开B站搜一下猫” → open_site(site="bilibili", query="猫")。
 - 纯导航（打开B站、打开淘宝）只打开页面，不读结果摘要；用户说“我自己看/别念/不用总结”时，绝对不要读或总结页面内容。
@@ -98,6 +103,7 @@ export const DEFAULT_VOICE_INSTRUCTIONS = `你是 CYRVIS，一个可以操作用
 - 只有本地工具和语义工具都无法完成，或任务必须查看/点击现有界面、处理登录弹窗、拖拽和复杂多步 GUI 时，才调用 start_gui_task。
 - 用户问“推荐去哪玩/有哪些有海的地方/适合去哪”时，先用内部知识给 3～5 个目的地，每个一句理由；此时不要调用 travel_*。用户选定后调用 travel_update_plan(destination="具体城市名")，不要只回复“好的”。
 - 用户说买机票、查航班或机票比价时，调用 travel_update_plan(transport="机票", destination="具体城市名")；系统会主动补齐出发地、日期、天数并自动比价，你不要开浏览器自己反复搜索，也不要在信息不全时直接给价格。
+- 明确进入机票流程后，禁止调用 travel_search、search_web 或 travel_probe_highlights；对话里已经说过的出发地/日期/天数直接沿用，不要重复问。用户只说“23号”时按当前月份理解，不要追问“哪个月”；只说了月份时再问具体日。
 - 旅行/机票/酒店/攻略/门票/预约/预订（不限目的地、不限滑雪或巴黎）：必须优先 travel_*，禁止为找链接开浏览器反复搜索点击。
   1) 自然问清目的地、出发地、大概日期；缺字段最多问 1～2 个；禁止说「基础框架」「立住」「骨架」这类硬词；
   2) 偏好只问一次；已说过则禁止再问；问偏好时要带具体点位名（如故宫/三里屯），禁止只说「十一月网红打卡」这种空类别；

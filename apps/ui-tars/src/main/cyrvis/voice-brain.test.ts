@@ -16,6 +16,14 @@ import { VoiceBrain, type VoiceBrainCallbacks } from './voice-brain';
 import { parseGazeSuggestion } from './gaze/suggestions';
 import type { GazeActionContext } from './gaze/actions';
 
+vi.mock('./travel/travel-memo', () => ({
+  appendTravelMemo: vi.fn(async () => null),
+  writeTravelPlanDesktopTxt: vi.fn(async () => ({
+    desktopPath: '/tmp/cyrvis-travel-plan.txt',
+    htmlPath: '/tmp/cyrvis-travel-plan.html',
+  })),
+}));
+
 class FakeGUIAdapter implements GUIAdapter {
   callbacks: GUIAdapterCallbacks | null = null;
   instruction = '';
@@ -116,6 +124,7 @@ const setup = (options?: {
   rememberFact?: (text: string) => Promise<string | null>;
   codingAgent?: CodingAgentService;
   openExternal?: (url: string) => Promise<void>;
+  travelBookingOpenDelayMs?: number;
 }) => {
   const adapter = new FakeGUIAdapter();
   const controller = new CyrvisController(adapter, {
@@ -149,6 +158,7 @@ const setup = (options?: {
       getGazeActionContext: options?.getGazeActionContext,
       codingAgent: options?.codingAgent,
       openExternal: options?.openExternal,
+      travelBookingOpenDelayMs: options?.travelBookingOpenDelayMs,
     },
   );
 
@@ -733,6 +743,7 @@ describe('VoiceBrain', () => {
       openExternal: async (url) => {
         opened.push(url);
       },
+      travelBookingOpenDelayMs: 10,
     });
     await brain.start();
 
@@ -749,6 +760,78 @@ describe('VoiceBrain', () => {
     await new Promise((resolve) => setTimeout(resolve, 1_300));
     expect(opened).toHaveLength(1);
     expect(opened[0]).toMatch(/^https?:\/\//);
+  });
+
+  it('keeps an active flight intake when the user talks over the question', async () => {
+    const { brain, provider } = setup({ requireWakeWord: false });
+    await brain.start();
+
+    provider.emitTranscript('我要买一张去三亚的机票', true);
+    await flush();
+    expect(provider.spoken.at(-1)).toContain('从哪个城市出发');
+
+    // Energy barge is the user starting to answer, not an explicit stop.
+    brain.handleBargeStop();
+    provider.emitTranscript('北京出发', true);
+    await flush();
+
+    expect(provider.spoken.at(-1)).toContain('大概哪天出发');
+  });
+
+  it('reuses planner origin and a bare-day date for flight intake', async () => {
+    const { brain, provider } = setup({ requireWakeWord: false });
+    await brain.start();
+
+    provider.emitToolCall({
+      name: 'travel_update_plan',
+      args: { destination: '三亚', origin: '北京', start_date: '23号' },
+      callId: 'plan-existing',
+    });
+    await flush();
+
+    provider.emitTranscript('我要买一张去三亚的机票', true);
+    await flush();
+
+    const last = provider.spoken.at(-1) || '';
+    expect(last).not.toContain('从哪个城市出发');
+    expect(last).not.toContain('大概哪天出发');
+    expect(last).toContain('打算待几天');
+  });
+
+  it('completes the observed 23号/单程 flight flow without asking the month', async () => {
+    const opened: string[] = [];
+    const { brain, provider } = setup({
+      requireWakeWord: false,
+      openExternal: async (url) => {
+        opened.push(url);
+      },
+      travelBookingOpenDelayMs: 10,
+    });
+    await brain.start();
+
+    provider.emitToolCall({
+      name: 'travel_update_plan',
+      args: { destination: '三亚', origin: '北京', start_date: '23号' },
+      callId: 'plan-23',
+    });
+    await flush();
+
+    provider.emitTranscript('我要买一张去三亚的机票', true);
+    await flush();
+    expect(provider.spoken.at(-1)).toContain('打算待几天');
+
+    // The user talks over the question; ASR hears "单程" as "单纯".
+    brain.handleBargeStop();
+    provider.emitTranscript('然后，单纯。', true);
+    await flush();
+
+    const last = provider.spoken.at(-1) || '';
+    expect(last).toContain('我比了 5 个平台');
+    expect(last).toContain('单程');
+    expect(last).not.toContain('哪个月');
+
+    await new Promise((resolve) => setTimeout(resolve, 1_300));
+    expect(opened).toHaveLength(1);
   });
 
   it('rejects a web search for a stable knowledge question', async () => {

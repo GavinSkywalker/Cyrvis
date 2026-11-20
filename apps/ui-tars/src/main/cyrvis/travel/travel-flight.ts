@@ -205,6 +205,26 @@ export const parseTravelDate = (
     );
   }
 
+  // "23号" / "23日": assume the current month unless that day has already
+  // passed, in which case the user means next month. Asking "which month?"
+  // for a day in the current month was a common, avoidable follow-up.
+  const dayOnly = raw.match(/(?<!\d)(\d{1,2})[日号](?!\d)/);
+  if (dayOnly) {
+    const day = Number(dayOnly[1]);
+    if (day >= 1 && day <= 31) {
+      let date = atLocalDate(now.getFullYear(), now.getMonth() + 1, day);
+      const todayStart = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate(),
+      ).getTime();
+      if (date.getTime() < todayStart) {
+        date = atLocalDate(now.getFullYear(), now.getMonth() + 2, day);
+      }
+      return formatIso(date);
+    }
+  }
+
   const week = raw.match(
     /(下周|下星期|本周|这周|这星期|周|星期)([一二三四五六日天])/,
   );
@@ -227,6 +247,8 @@ export const parseTravelDate = (
 export const parseTravelDurationDays = (text: string): number | undefined => {
   const raw = text.trim();
   if (!raw) return undefined;
+  // One-way has no stay duration; compareFlights treats 0 as a single trip.
+  if (/(?:单程|去程|one.?way)/i.test(raw)) return 0;
   if (/(?:半个月|两周|两个星期)/.test(raw)) return 15;
   if (/(?:一周|一个星期|7天)/.test(raw)) return 7;
   const match = raw.match(
@@ -388,7 +410,11 @@ export const TRAVEL_FLIGHT_SLOTS: IntakeSlotSpec[] = [
     kind: 'duration',
     priority: 4,
     defaultValue: '3',
-    parse: (text) => parseTravelDurationDays(text),
+    parse: (text, context) => {
+      // ASR commonly hears "单程" as "单纯" at the end of a sentence.
+      if (context.expected && /单纯/.test(text)) return 0;
+      return parseTravelDurationDays(text);
+    },
   },
 ];
 

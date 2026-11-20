@@ -71,6 +71,8 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
   private proactiveItemId: string | null = null;
   private proactiveItemPending = false;
   private proactiveDeleteRequested = false;
+  private lastUserItemId: string | null = null;
+  private pendingSpeakExact = false;
   private cancelRequested = false;
   private localSpeechActive = false;
   private localSpeechMs = 0;
@@ -199,6 +201,7 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
     this.activeResponseId = null;
     this.pendingToolResults = [];
     this.pendingSpeak = null;
+    this.pendingSpeakExact = false;
     this.pendingUserText = null;
     this.proactivePending = false;
     this.readOnlySpeech = false;
@@ -461,6 +464,7 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
     this.activeResponseId = null;
     this.deleteProactiveItem();
     this.pendingSpeak = null;
+    this.pendingSpeakExact = false;
     this.pendingUserText = null;
     this.pendingToolResults = [];
     this.playbackBusy = false;
@@ -489,23 +493,33 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
     // Task lifecycle messages are single-slot. Clearing this prevents a
     // queued "still processing" line from being spoken after task_done.
     this.pendingSpeak = null;
+    this.pendingSpeakExact = false;
   }
 
   speak(text: string): void {
+    const exact = this.pendingSpeakExact;
+    this.pendingSpeakExact = false;
     if (!this.connected || !text.trim()) {
       return;
     }
 
     if (this.cancelRequested || this.awaitingResponse || this.playbackBusy) {
       this.pendingSpeak = text;
+      this.pendingSpeakExact = exact;
       console.log('[cyrvis provider] proactive speech queued', {
         cancelRequested: this.cancelRequested,
         playbackBusy: this.playbackBusy,
+        exact,
       });
       return;
     }
 
-    this.sendProactiveSpeak(text);
+    this.sendProactiveSpeak(text, exact);
+  }
+
+  speakExact(text: string): void {
+    this.pendingSpeakExact = true;
+    this.speak(text);
   }
   isReady(): boolean {
     return this.connected;
@@ -537,7 +551,19 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
     console.log('[cyrvis provider] tool result sent');
   }
 
-  private sendProactiveSpeak(text: string): void {
+  private sendProactiveSpeak(text: string, exact = false): void {
+    if (exact && this.lastUserItemId) {
+      const staleUserItemId = this.lastUserItemId;
+      this.lastUserItemId = null;
+      this.send({
+        event_id: eventId('event_exact_drop_user'),
+        type: 'conversation.item.delete',
+        item_id: staleUserItemId,
+      });
+      console.log('[cyrvis provider] exact speech dropped last user turn', {
+        itemId: staleUserItemId,
+      });
+    }
     this.proactivePending = false;
     this.readOnlySpeech = true;
     this.awaitingResponse = true;
@@ -645,8 +671,10 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
 
     if (this.pendingSpeak) {
       const text = this.pendingSpeak;
+      const exact = this.pendingSpeakExact;
       this.pendingSpeak = null;
-      this.sendProactiveSpeak(text);
+      this.pendingSpeakExact = false;
+      this.sendProactiveSpeak(text, exact);
     }
   }
 
@@ -713,6 +741,7 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
     this.proactiveItemPending = false;
     this.pendingToolResults = [];
     this.pendingSpeak = null;
+    this.pendingSpeakExact = false;
     this.pendingUserText = null;
     this.proactivePending = false;
     this.readOnlySpeech = false;
@@ -816,18 +845,18 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
         break;
       case 'conversation.item.created': {
         const item = event.item as { id?: string; role?: string } | undefined;
-        if (
-          (this.proactiveItemPending || this.proactiveDeleteRequested) &&
-          item?.role === 'user' &&
-          item.id
-        ) {
-          this.proactiveItemId = item.id;
-          this.proactiveItemPending = false;
-          console.log('[cyrvis provider] proactive item created', {
-            itemId: item.id,
-          });
-          if (this.proactiveDeleteRequested) {
-            this.deleteProactiveItem();
+        if (item?.role === 'user' && item.id) {
+          if (this.proactiveItemPending || this.proactiveDeleteRequested) {
+            this.proactiveItemId = item.id;
+            this.proactiveItemPending = false;
+            console.log('[cyrvis provider] proactive item created', {
+              itemId: item.id,
+            });
+            if (this.proactiveDeleteRequested) {
+              this.deleteProactiveItem();
+            }
+          } else {
+            this.lastUserItemId = item.id;
           }
         }
         break;

@@ -157,6 +157,8 @@ export interface VoiceBrainOptions {
   ) => Promise<PendingIntentDecision>;
   /** Used by the travel demo to open the recommended booking page. */
   openExternal?: (url: string) => Promise<void>;
+  /** Test hook: override the estimated wait before opening the booking page. */
+  travelBookingOpenDelayMs?: number;
 }
 
 const DEFAULT_WAKE_PATTERNS: RegExp[] = [
@@ -533,7 +535,7 @@ export class VoiceBrain {
    * mishears "停". Cancel the current response and keep the model silent for
    * a short window so it cannot answer with "好的，已暂停…".
    */
-  markUserStop(): void {
+  markUserStop(preserveIntake = false): void {
     this.inspectionGeneration++;
     this.gazeToolTurn = null;
     this.deterministicInspection = null;
@@ -543,7 +545,9 @@ export class VoiceBrain {
     if (this.gazeSuggestion) {
       this.gazeSuggestion = null;
     }
-    this.clearTravelFlightIntake();
+    if (!preserveIntake) {
+      this.clearTravelFlightIntake();
+    }
     // Qwen can start a follow-up response 2-3s after the barge audio was
     // cancelled. 3s covers the observed 2.3s follow-up while still allowing
     // a real new command to clear the window immediately.
@@ -558,13 +562,14 @@ export class VoiceBrain {
    * Deterministic barge stop. Do not wait for ASR: a confirmed barge may be a
    * short "停" that the model hears as empty or something else several seconds
    * later. Pause the GUI task and keep the assistant silent.
+   *
+   * An energy barge is usually the user starting to answer the assistant's
+   * question (e.g. "北京出发" while it asks for the origin), so it must stop
+   * the speech without discarding an active intake. A KWS/global-shortcut
+   * barge is an explicit stop and still clears the intake.
    */
-  handleBargeStop(_hardStop = false): void {
-    // Any confirmed barge is a stop, not a pause. KWS recall is not reliable
-    // enough on this Bluetooth/headset path; depending on it left tasks
-    // running after several "停一下" attempts. Cancel the task immediately
-    // when the user starts speaking over the assistant.
-    this.handleStopCommand();
+  handleBargeStop(hardStop = false): void {
+    this.handleStopCommand(!hardStop);
   }
 
   sleep(): void {
@@ -1230,15 +1235,19 @@ export class VoiceBrain {
     const active = this.intakeEngine.getSession();
     if (active?.domain === TRAVEL_FLIGHT_DOMAIN) {
       this.intakeScheduler.cancelPending();
-      this.provider.cancelResponse();
       const turn = this.intakeEngine.updateFromText(text);
       if (turn && turn.filled.length > 0) {
         if (turn.ready) {
+          // Do not cancel the model's acknowledgement here. Canceling it and
+          // then sending the comparison as a proactive line made the model
+          // answer the stale slot turn instead of reading the comparison, so
+          // the browser opened without the price summary being spoken.
+          // Let the acknowledgement finish; the comparison is queued behind it.
           void this.completeTravelFlight();
           return true;
         }
         if (turn.question) {
-          this.speak(`收到。${turn.question}`);
+          this.speakExact(`收到。${turn.question}`);
           if (turn.nextSlot) {
             this.scheduleIntakeReminder(turn.session, turn.nextSlot);
           }
@@ -1252,11 +1261,12 @@ export class VoiceBrain {
           text,
         );
       if (newCommand || text.trim().length > 18) {
+        this.provider.cancelResponse();
         this.clearTravelFlightIntake();
         return false;
       }
       if (current) {
-        this.speak(`还在等你补充${current.label}。${current.question}`);
+        this.speakExact(`还在等你补充${current.label}。${current.question}`);
         this.scheduleIntakeReminder(active, current);
         return true;
       }
@@ -1268,11 +1278,15 @@ export class VoiceBrain {
     }
     this.provider.cancelResponse();
 
-    const plannerDestination =
-      travelPlanner.getSnapshot().framework.destination;
-    const destination = parseTravelDestination(text) || plannerDestination;
-    const origin = parseTravelOrigin(text);
-    const departDate = parseTravelDate(text);
+    const framework = travelPlanner.getSnapshot().framework;
+    const destination = parseTravelDestination(text) || framework.destination;
+    const origin = parseTravelOrigin(text) || framework.origin;
+    // The planner already has what the user said earlier (e.g. "从北京",
+    // "23号"). Reuse it instead of asking the same question again; a bare
+    // day such as "23号" is resolved against the current month.
+    const departDate =
+      parseTravelDate(text) ||
+      (framework.startDate ? parseTravelDate(framework.startDate) : undefined);
     const durationDays = parseTravelDurationDays(text);
     if (destination || origin || departDate) {
       travelPlanner.updateFramework({
@@ -1301,7 +1315,7 @@ export class VoiceBrain {
       this.clearTravelFlightIntake();
       return false;
     }
-    this.speak(`好的，我来帮你比机票。${next.question}`);
+    this.speakExact(`好的，我来帮你比机票。${next.question}`);
     this.scheduleIntakeReminder(session, next.slot);
     return true;
   }
@@ -1317,7 +1331,7 @@ export class VoiceBrain {
         const current = this.intakeEngine.getSession();
         if (!current || current.id !== sessionId) return;
         if (this.userStopped || !this.awake || this.userSpeaking) return;
-        this.speak(`还在等你补充${slot.label}。${slot.question}`);
+        this.speakExact(`还在等你补充${slot.label}。${slot.question}`);
       },
       () => {
         const current = this.intakeEngine.getSession();
@@ -1350,7 +1364,7 @@ export class VoiceBrain {
     if (!origin || !destination || !departDate) {
       const next = this.intakeEngine.next();
       if (next) {
-        this.speak(next.question);
+        this.speakExact(next.question);
         this.scheduleIntakeReminder(session, next.slot);
       }
       return;
@@ -1370,13 +1384,20 @@ export class VoiceBrain {
       this.intakeEngine.complete();
       this.taskSpeechGuardUntil =
         Date.now() + Math.min(15_000, Math.max(3_000, speech.length * 180));
-      this.speak(speech);
+      this.speakExact(speech);
       const url = comparison.best?.url;
       if (url) {
+        // The comparison is a long spoken line; opening the page after 1.2s
+        // looked like the assistant had only redirected to Qunar. Wait for the
+        // estimated speech duration (plus the acknowledgement already playing)
+        // before opening it. A stop during the speech suppresses the open.
+        const openDelay =
+          this.options.travelBookingOpenDelayMs ??
+          Math.min(30_000, Math.max(6_000, speech.length * 180 + 6_000));
         setTimeout(() => {
           if (this.userStopped) return;
           void this.openTravelBooking(url);
-        }, 1_200);
+        }, openDelay);
       }
     } finally {
       this.travelFlightCompleting = false;
@@ -3216,7 +3237,7 @@ export class VoiceBrain {
     );
   }
 
-  private handleStopCommand(): boolean {
+  private handleStopCommand(preserveIntake = false): boolean {
     const status = this.controller.getStatus().status;
     const guiActive = [
       'starting',
@@ -3232,7 +3253,7 @@ export class VoiceBrain {
     this.pendingBargeStopAt = 0;
     this.provider.cancelResponse();
     this.provider.cancelPendingSpeech?.();
-    this.markUserStop();
+    this.markUserStop(preserveIntake);
     this.taskConversation.markStopped();
     this.lastDeterministicControl = { kind: 'cancel', at: Date.now() };
     console.info('[cyrvis voice] hard stop', {
@@ -3528,12 +3549,29 @@ export class VoiceBrain {
   }
 
   private speak(text: string): void {
+    this.say(text, false);
+  }
+
+  /**
+   * Deterministic workflow lines (flight intake questions and the final
+   * comparison) must be spoken exactly. The provider may drop the last user
+   * turn first, otherwise the model answers that turn instead of reading.
+   */
+  private speakExact(text: string): void {
+    this.say(text, true);
+  }
+
+  private say(text: string, exact: boolean): void {
     if (!this.awake) return;
     this.taskConversation.noteAssistantOutput();
     this.markUserResponseOutput();
     this.ttsSpeaking = true;
     this.proactivity.setTtsSpeaking(true);
-    this.provider.speak(text);
+    if (exact && this.provider.speakExact) {
+      this.provider.speakExact(text);
+    } else {
+      this.provider.speak(text);
+    }
     this.notifyState();
 
     if (this.speakWatchdog) {
