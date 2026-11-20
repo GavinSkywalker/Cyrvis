@@ -252,7 +252,7 @@ export const CYRVIS_VOICE_TOOLS: QwenToolDefinition[] = [
     function: {
       name: 'start_coding_task',
       description:
-        'Start a repository-level coding task with the coding agent. Use only for code tasks: read/edit multiple files, fix a bug, implement an interface, write/run tests, inspect a repository. Do NOT use for opening apps, ordinary text files, web search, or GUI interaction. The agent works only inside the configured demo workspace and asks before running shell commands.',
+        'Start a coding task with the coding agent. Use for code files and scripts as well as repository work: create or edit code, implement an algorithm, fix a bug, write/run tests. Do NOT use for ordinary non-code text files, opening apps, web search, or GUI interaction. The agent works inside the configured demo workspace and asks before running shell commands.',
       parameters: {
         type: 'object',
         properties: {

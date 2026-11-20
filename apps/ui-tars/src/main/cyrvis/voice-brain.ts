@@ -1184,22 +1184,25 @@ export class VoiceBrain {
     }
 
     const hasCodeFile =
-      /\.(?:js|mjs|cjs|ts|tsx|jsx|py|java|cpp|c|go|rs|rb|php|sh|ps1)\b/i.test(
+      /\.(?:js|mjs|cjs|ts|tsx|jsx|py|java|cpp|c|go|rs|rb|php|sh|ps1)\b|(?:python|py|javascript|js|typescript|ts|java|c\+\+|cpp|go|rust|ruby|php|shell|bash|powershell|ps1)\s*(?:文件|脚本|程序)/i.test(
         text,
       );
     const hasCodeVerb =
-      /(创建|新建|写|生成|实现|修复|改|重构|添加|加|运行|执行|跑|测试|test|run|execute)/i.test(
+      /(创建|新建|建|写|生成|实现|修复|改|重构|添加|加|运行|执行|跑|测试|test|run|execute)/i.test(
         text,
       );
+    const hasWriteCodeVerb =
+      /(创建|新建|建|写|生成|实现|修复|改|重构|添加|加|测试|test)/i.test(text);
     const hasRepoContext =
       /(项目|仓库|代码|工作区|workspace|demo|coding)/i.test(text);
     const hasStrongCodeTerm =
-      /(代码|脚本|接口|函数|组件|bug|测试|运行|执行|仓库|workspace|coding|修复)/i.test(
+      /(代码|脚本|程序|算法|函数|接口|组件|排序|查找|遍历|递归|链表|二叉树|动态规划|dfs|bfs|bug|测试|运行|执行|仓库|workspace|coding|修复)/i.test(
         text,
       );
     if (
       !(hasCodeFile && hasCodeVerb) &&
-      !(hasRepoContext && hasStrongCodeTerm)
+      !(hasRepoContext && hasStrongCodeTerm) &&
+      !(hasStrongCodeTerm && hasWriteCodeVerb)
     ) {
       return false;
     }

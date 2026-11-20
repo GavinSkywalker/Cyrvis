@@ -1088,6 +1088,26 @@ describe('VoiceBrain', () => {
     expect(cancel).toHaveBeenCalledTimes(1);
   });
 
+  it('routes file plus algorithm plus run requests to the coding agent', async () => {
+    const start = vi.fn().mockResolvedValue({ status: 'running' });
+    const codingAgent = {
+      isBusy: () => false,
+      start,
+    } as unknown as CodingAgentService;
+    const { adapter, brain, provider } = setup({ codingAgent });
+    await brain.start();
+    provider.emitTranscript('Hello CYRVIS', true);
+    provider.emitTranscript(
+      '给我建一个python文件，写一个DFS算法，带例子并运行。',
+      true,
+    );
+    await flush();
+
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(String(start.mock.calls[0]?.[0])).toContain('DFS');
+    expect(adapter.instruction).toBe('');
+  });
+
   it('speaks only key coding nodes and reports command output', async () => {
     const { brain, provider } = setup({ requireWakeWord: false });
     await brain.start();
