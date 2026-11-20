@@ -49,13 +49,27 @@ import {
   TRAVEL_FLIGHT_DOMAIN,
   TRAVEL_FLIGHT_SLOTS,
   compareFlights,
+  compareLiveFlights,
   formatFlightComparison,
+  formatLiveFlightComparison,
   isTravelFlightIntent,
   parseTravelDate,
   parseTravelDestination,
   parseTravelDurationDays,
   parseTravelOrigin,
+  type FlightComparison,
+  type FlightSearchInput,
 } from './travel/travel-flight';
+import {
+  buildGoogleFlightsUrl,
+  searchLiveFlights,
+  type LiveFlightSearchResult,
+} from './travel/flight-provider';
+import {
+  focusOtaOffer,
+  searchOtaFlights,
+  type OtaFlightSearchResult,
+} from './travel/ota-flight-provider';
 import type { ControllerEvent } from './types';
 import {
   SENSITIVE_CONFIRMATION_PROMPT,
@@ -159,6 +173,14 @@ export interface VoiceBrainOptions {
   openExternal?: (url: string) => Promise<void>;
   /** Test hook: override the estimated wait before opening the booking page. */
   travelBookingOpenDelayMs?: number;
+  /** Real-time flight search. Tests inject a fixture; production uses Google Flights. */
+  flightSearch?: (input: FlightSearchInput) => Promise<LiveFlightSearchResult>;
+  /** Best-effort Ctrip/Trip.com scrape. Tests inject a fixture. */
+  otaSearch?: (input: FlightSearchInput) => Promise<OtaFlightSearchResult>;
+  /** Set false only for the deterministic demo/tests. */
+  useLiveFlights?: boolean;
+  /** Set false in tests to avoid launching a visible browser. */
+  useOtaFlights?: boolean;
 }
 
 const DEFAULT_WAKE_PATTERNS: RegExp[] = [
@@ -1372,33 +1394,116 @@ export class VoiceBrain {
 
     this.travelFlightCompleting = true;
     try {
-      const comparison = compareFlights({
+      // Finish the intake before the network search: a slow provider must not
+      // keep the slot session open or let a new utterance mutate its answers.
+      this.intakeScheduler.cancelAll();
+      this.intakeEngine.complete();
+      const input: FlightSearchInput = {
         origin,
         destination,
         departDate,
         durationDays,
         passengers: 1,
-      });
-      const speech = formatFlightComparison(comparison);
-      this.intakeScheduler.cancelAll();
-      this.intakeEngine.complete();
+      };
+      const useLive =
+        this.options.useLiveFlights ??
+        process.env.CYRVIS_FLIGHT_PROVIDER !== 'demo';
+      let comparison: FlightComparison | null = null;
+
+      if (useLive) {
+        this.speak('好的，我查一下实时航班，请稍等。');
+        const useOta =
+          (this.options.useOtaFlights ?? true) && !input.durationDays;
+        const [googleOutcome, otaOutcome] = await Promise.allSettled([
+          (this.options.flightSearch ?? searchLiveFlights)(input),
+          useOta
+            ? (this.options.otaSearch ?? searchOtaFlights)(input)
+            : Promise.resolve(null),
+        ]);
+        let google: LiveFlightSearchResult | null = null;
+        let ota: OtaFlightSearchResult | null = null;
+        if (googleOutcome.status === 'fulfilled') {
+          google = googleOutcome.value;
+        } else {
+          console.warn('[cyrvis travel] Google Flights search failed', {
+            error:
+              googleOutcome.reason instanceof Error
+                ? googleOutcome.reason.message
+                : String(googleOutcome.reason),
+          });
+        }
+        if (otaOutcome.status === 'fulfilled') {
+          ota = otaOutcome.value;
+          if (ota) {
+            console.info('[cyrvis travel] OTA search', {
+              ctrip: ota.sources.ctrip,
+              trip: ota.sources.trip,
+            });
+          }
+        } else {
+          console.warn('[cyrvis travel] OTA search failed', {
+            error:
+              otaOutcome.reason instanceof Error
+                ? otaOutcome.reason.message
+                : String(otaOutcome.reason),
+          });
+        }
+        const offers = [...(google?.offers ?? []), ...(ota?.offers ?? [])];
+        if (offers.length) {
+          comparison = compareLiveFlights(input, offers, google?.searchUrl);
+        }
+      } else {
+        comparison = compareFlights(input);
+      }
+
+      if (!comparison) {
+        // Never fall back to fake prices when the user asked for real fares.
+        let fallbackUrl = 'https://www.google.com/travel/flights';
+        try {
+          fallbackUrl = buildGoogleFlightsUrl(input);
+        } catch {
+          // Keep the generic Google Flights landing page.
+        }
+        // Open immediately: the user should see the live page as soon as the
+        // real-data attempt fails, not after the failure speech finishes.
+        void this.openTravelBooking(fallbackUrl);
+        const speech =
+          '实时航班查询失败，我先打开 Google Flights 搜索页，你可以在页面上看实时价格。';
+        this.taskSpeechGuardUntil = Date.now() + 8_000;
+        this.speakExact(speech);
+        return;
+      }
+
+      const speech =
+        comparison.source === 'google_flights'
+          ? formatLiveFlightComparison(comparison)
+          : formatFlightComparison(comparison);
       this.taskSpeechGuardUntil =
         Date.now() + Math.min(15_000, Math.max(3_000, speech.length * 180));
-      this.speakExact(speech);
-      const url = comparison.best?.url;
+      const best = comparison.best;
+      const url = best?.url || comparison.searchUrl;
+      // Open the source immediately, before the summary. For OTA winners also
+      // launch the persistent-profile helper that clicks the exact flight and
+      // leaves Chrome on its fare/checkout page.
       if (url) {
-        // The comparison is a long spoken line; opening the page after 1.2s
-        // looked like the assistant had only redirected to Qunar. Wait for the
-        // estimated speech duration (plus the acknowledgement already playing)
-        // before opening it. A stop during the speech suppresses the open.
-        const openDelay =
-          this.options.travelBookingOpenDelayMs ??
-          Math.min(30_000, Math.max(6_000, speech.length * 180 + 6_000));
-        setTimeout(() => {
-          if (this.userStopped) return;
-          void this.openTravelBooking(url);
-        }, openDelay);
+        void this.openTravelBooking(url);
       }
+      const otaSource = best?.metadata?.source;
+      if (otaSource === 'ctrip' || otaSource === 'trip') {
+        focusOtaOffer({
+          source: otaSource,
+          origin,
+          destination,
+          date: departDate,
+          flightNo:
+            typeof best?.metadata?.flightNo === 'string'
+              ? best.metadata.flightNo
+              : undefined,
+          airline: best?.provider,
+          price: best?.totalPrice,
+        });
+      }
+      this.speakExact(speech);
     } finally {
       this.travelFlightCompleting = false;
     }

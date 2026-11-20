@@ -27,6 +27,8 @@ export interface IntakeSlotSpec {
   kind: IntakeSlotKind;
   /** Required slots block execution. Defaults to true. */
   required?: boolean;
+  /** Set false for optional fields that should never be proactively asked. */
+  ask?: boolean;
   /** Lower numbers are asked first. */
   priority: number;
   /** Used when the user says “随便/你定/都可以”. */

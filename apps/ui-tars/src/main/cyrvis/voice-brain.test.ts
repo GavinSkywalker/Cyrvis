@@ -5,6 +5,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { CodingAgentService, CodingTaskSnapshot } from './coding-agent';
+import type { LiveFlightSearchResult } from './travel/flight-provider';
+import type { FlightSearchInput } from './travel/travel-flight';
 import { CyrvisController } from './controller';
 import type { ControllerEvent, GUIAdapter, GUIAdapterCallbacks } from './types';
 import type {
@@ -125,6 +127,12 @@ const setup = (options?: {
   codingAgent?: CodingAgentService;
   openExternal?: (url: string) => Promise<void>;
   travelBookingOpenDelayMs?: number;
+  useLiveFlights?: boolean;
+  flightSearch?: (input: FlightSearchInput) => Promise<LiveFlightSearchResult>;
+  useOtaFlights?: boolean;
+  otaSearch?: (
+    input: FlightSearchInput,
+  ) => Promise<import('./travel/ota-flight-provider').OtaFlightSearchResult>;
 }) => {
   const adapter = new FakeGUIAdapter();
   const controller = new CyrvisController(adapter, {
@@ -159,6 +167,10 @@ const setup = (options?: {
       codingAgent: options?.codingAgent,
       openExternal: options?.openExternal,
       travelBookingOpenDelayMs: options?.travelBookingOpenDelayMs,
+      useLiveFlights: options?.useLiveFlights ?? false,
+      flightSearch: options?.flightSearch,
+      useOtaFlights: options?.useOtaFlights ?? false,
+      otaSearch: options?.otaSearch,
     },
   );
 
@@ -779,7 +791,10 @@ describe('VoiceBrain', () => {
   });
 
   it('reuses planner origin and a bare-day date for flight intake', async () => {
-    const { brain, provider } = setup({ requireWakeWord: false });
+    const { brain, provider } = setup({
+      requireWakeWord: false,
+      openExternal: async () => undefined,
+    });
     await brain.start();
 
     provider.emitToolCall({
@@ -795,17 +810,18 @@ describe('VoiceBrain', () => {
     const last = provider.spoken.at(-1) || '';
     expect(last).not.toContain('从哪个城市出发');
     expect(last).not.toContain('大概哪天出发');
-    expect(last).toContain('打算待几天');
+    expect(last).not.toContain('打算待几天');
+    expect(last).toContain('我比了 5 个平台');
+    expect(last).toContain('单程');
   });
 
-  it('completes the observed 23号/单程 flight flow without asking the month', async () => {
+  it('defaults to one-way without asking for a duration', async () => {
     const opened: string[] = [];
     const { brain, provider } = setup({
       requireWakeWord: false,
       openExternal: async (url) => {
         opened.push(url);
       },
-      travelBookingOpenDelayMs: 10,
     });
     await brain.start();
 
@@ -816,22 +832,89 @@ describe('VoiceBrain', () => {
     });
     await flush();
 
+    // The user did not say "单程" or a number of days. The optional duration
+    // must not turn into another question; compare one-way immediately.
     provider.emitTranscript('我要买一张去三亚的机票', true);
-    await flush();
-    expect(provider.spoken.at(-1)).toContain('打算待几天');
-
-    // The user talks over the question; ASR hears "单程" as "单纯".
-    brain.handleBargeStop();
-    provider.emitTranscript('然后，单纯。', true);
     await flush();
 
     const last = provider.spoken.at(-1) || '';
     expect(last).toContain('我比了 5 个平台');
     expect(last).toContain('单程');
+    expect(last).not.toContain('打算待几天');
     expect(last).not.toContain('哪个月');
 
     await new Promise((resolve) => setTimeout(resolve, 1_300));
     expect(opened).toHaveLength(1);
+  });
+
+  it('speaks live Google Flights results and opens the live search page', async () => {
+    const opened: string[] = [];
+    const searchUrl =
+      'https://www.google.com/travel/flights?q=Flights%20from%20BJS%20to%20SYX';
+    const { brain, provider } = setup({
+      requireWakeWord: false,
+      useLiveFlights: true,
+      openExternal: async (url) => {
+        opened.push(url);
+      },
+      travelBookingOpenDelayMs: 10,
+      flightSearch: async () => ({
+        source: 'google_flights',
+        searchUrl,
+        offers: [
+          {
+            id: 'ZH-2340',
+            providerId: 'ZH',
+            provider: '深航',
+            title: '深航 BJS → SYX',
+            totalPrice: 2340,
+            currency: 'CNY',
+            url: searchUrl,
+            conditions: {
+              direct: false,
+              transferCount: 1,
+              baggageKg: 0,
+              refundable: false,
+              departureTime: '21:15',
+            },
+            departTime: '21:15',
+            metadata: { live: true },
+          },
+          {
+            id: 'CZ-4230',
+            providerId: 'CZ',
+            provider: '南航',
+            title: '南航 BJS → SYX',
+            totalPrice: 4230,
+            currency: 'CNY',
+            url: searchUrl,
+            conditions: {
+              direct: true,
+              transferCount: 0,
+              baggageKg: 0,
+              refundable: false,
+              departureTime: '07:25',
+            },
+            departTime: '07:25',
+            metadata: { live: true },
+          },
+        ],
+      }),
+    });
+    await brain.start();
+
+    provider.emitTranscript('我要买一张去三亚的机票', true);
+    await flush();
+    provider.emitTranscript('北京，下周五，待五天', true);
+    await flush();
+    await new Promise((resolve) => setTimeout(resolve, 1_300));
+
+    expect(
+      provider.spoken.some((text) =>
+        text.includes('Google Flights 的实时结果'),
+      ),
+    ).toBe(true);
+    expect(opened).toEqual([searchUrl]);
   });
 
   it('rejects a web search for a stable knowledge question', async () => {
