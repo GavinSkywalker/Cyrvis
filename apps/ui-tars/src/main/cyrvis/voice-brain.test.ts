@@ -115,6 +115,7 @@ const setup = (options?: {
   awakeTimeoutMs?: number;
   rememberFact?: (text: string) => Promise<string | null>;
   codingAgent?: CodingAgentService;
+  openExternal?: (url: string) => Promise<void>;
 }) => {
   const adapter = new FakeGUIAdapter();
   const controller = new CyrvisController(adapter, {
@@ -147,6 +148,7 @@ const setup = (options?: {
       inspectGaze: options?.inspectGaze,
       getGazeActionContext: options?.getGazeActionContext,
       codingAgent: options?.codingAgent,
+      openExternal: options?.openExternal,
     },
   );
 
@@ -707,6 +709,31 @@ describe('VoiceBrain', () => {
     expect(adapter.instruction).toBe('');
     expect(provider.toolResults[0].output).toContain('USE_SEARCH_WEB');
     expect(provider.toolResults[0].output).toContain('去巴黎的机票');
+  });
+
+  it('collects flight details and opens the recommended booking page', async () => {
+    const opened: string[] = [];
+    const { brain, provider } = setup({
+      requireWakeWord: false,
+      openExternal: async (url) => {
+        opened.push(url);
+      },
+    });
+    await brain.start();
+
+    provider.emitTranscript('我要买一张去三亚的机票', true);
+    await flush();
+    expect(provider.spoken.at(-1)).toContain('从哪个城市出发');
+
+    provider.emitTranscript('北京，下周五，待五天', true);
+    await flush();
+    expect(
+      provider.spoken.some((text) => text.includes('我比了 5 个平台')),
+    ).toBe(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 1_300));
+    expect(opened).toHaveLength(1);
+    expect(opened[0]).toMatch(/^https?:\/\//);
   });
 
   it('rejects a web search for a stable knowledge question', async () => {

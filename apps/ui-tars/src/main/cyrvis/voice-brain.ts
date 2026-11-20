@@ -24,6 +24,9 @@ import { buildSearchUrl, defaultSearchEngine } from './navigation';
 import { resolveSite, buildSiteSearchUrl } from './site-registry';
 import { NAVIGATION_TOOL_ALIASES } from './voice/tool-surface';
 import { classifyIntent, isExplicitChat } from './intent-gate';
+import { IntakeEngine } from './intake/engine';
+import { IntakeScheduler } from './intake/scheduler';
+import type { IntakeSession, IntakeSlotSpec } from './intake/types';
 import { ProactivityPolicy, type ProactivityOptions } from './proactivity';
 import { classifyVoiceIntent, type VoiceIntentDecision } from './search-intent';
 import { TaskConversationCoordinator } from './task-conversation';
@@ -42,6 +45,17 @@ import {
   probeTravelHighlights,
   searchTravelInfo,
 } from './travel/travel-search';
+import {
+  TRAVEL_FLIGHT_DOMAIN,
+  TRAVEL_FLIGHT_SLOTS,
+  compareFlights,
+  formatFlightComparison,
+  isTravelFlightIntent,
+  parseTravelDate,
+  parseTravelDestination,
+  parseTravelDurationDays,
+  parseTravelOrigin,
+} from './travel/travel-flight';
 import type { ControllerEvent } from './types';
 import {
   SENSITIVE_CONFIRMATION_PROMPT,
@@ -141,6 +155,8 @@ export interface VoiceBrainOptions {
   classifyPendingIntent?: (
     input: PendingIntentInput,
   ) => Promise<PendingIntentDecision>;
+  /** Used by the travel demo to open the recommended booking page. */
+  openExternal?: (url: string) => Promise<void>;
 }
 
 const DEFAULT_WAKE_PATTERNS: RegExp[] = [
@@ -267,6 +283,9 @@ export class VoiceBrain {
   private codingFileNames = new Set<string>();
   private lastCodingProgressAt = 0;
   private lastCodingProgressMessage = '';
+  private readonly intakeEngine = new IntakeEngine();
+  private readonly intakeScheduler = new IntakeScheduler();
+  private travelFlightCompleting = false;
   private lastHardStopAt = 0;
   private navigationExecutions = new Set<string>();
   private readonly unsubscribeController: () => void;
@@ -524,6 +543,7 @@ export class VoiceBrain {
     if (this.gazeSuggestion) {
       this.gazeSuggestion = null;
     }
+    this.clearTravelFlightIntake();
     // Qwen can start a follow-up response 2-3s after the barge audio was
     // cancelled. 3s covers the observed 2.3s follow-up while still allowing
     // a real new command to clear the window immediately.
@@ -568,6 +588,7 @@ export class VoiceBrain {
       clearTimeout(this.speakWatchdog);
       this.speakWatchdog = null;
     }
+    this.clearTravelFlightIntake();
     this.unsubscribeController();
     this.proactivity.reset();
     this.provider.close();
@@ -586,6 +607,7 @@ export class VoiceBrain {
         this.notifyState();
       },
       onSpeechStarted: () => {
+        this.intakeScheduler.cancelPending();
         if (!this.userSpeaking) {
           this.speechTurn++;
           this.speechAwaitingTranscript = true;
@@ -1068,6 +1090,10 @@ export class VoiceBrain {
       return true;
     }
 
+    if (this.handleTravelFlightCommand(text)) {
+      return true;
+    }
+
     // Code-file creation/execution is deterministic enough to route before
     // the model can mistake it for a Notepad/desktop task.
     if (this.handleCodingCommand(text)) {
@@ -1180,6 +1206,178 @@ export class VoiceBrain {
     }
     this.speak(this.taskConversation.describeStatus());
     return true;
+  }
+
+  private handleTravelFlightCommand(text: string): boolean {
+    const active = this.intakeEngine.getSession();
+    if (active?.domain === TRAVEL_FLIGHT_DOMAIN) {
+      this.intakeScheduler.cancelPending();
+      this.provider.cancelResponse();
+      const turn = this.intakeEngine.updateFromText(text);
+      if (turn && turn.filled.length > 0) {
+        if (turn.ready) {
+          void this.completeTravelFlight();
+          return true;
+        }
+        if (turn.question) {
+          this.speak(`收到。${turn.question}`);
+          if (turn.nextSlot) {
+            this.scheduleIntakeReminder(turn.session, turn.nextSlot);
+          }
+          return true;
+        }
+      }
+
+      const current = this.intakeEngine.getCurrentSlot();
+      const newCommand =
+        /(打开|搜索|播放|写|代码|编码|任务|文件|天气|新闻|介绍|讲个|聊|暂停|继续)/.test(
+          text,
+        );
+      if (newCommand || text.trim().length > 18) {
+        this.clearTravelFlightIntake();
+        return false;
+      }
+      if (current) {
+        this.speak(`还在等你补充${current.label}。${current.question}`);
+        this.scheduleIntakeReminder(active, current);
+        return true;
+      }
+      return false;
+    }
+
+    if (!isTravelFlightIntent(text)) {
+      return false;
+    }
+    this.provider.cancelResponse();
+
+    const plannerDestination =
+      travelPlanner.getSnapshot().framework.destination;
+    const destination = parseTravelDestination(text) || plannerDestination;
+    const origin = parseTravelOrigin(text);
+    const departDate = parseTravelDate(text);
+    const durationDays = parseTravelDurationDays(text);
+    if (destination || origin || departDate) {
+      travelPlanner.updateFramework({
+        destination,
+        origin,
+        startDate: departDate,
+        transport: '机票',
+        userText: text,
+      });
+    }
+
+    this.intakeEngine.start(TRAVEL_FLIGHT_DOMAIN, text, TRAVEL_FLIGHT_SLOTS, {
+      destination,
+      origin,
+      departDate,
+      durationDays,
+    });
+    const session = this.intakeEngine.getSession();
+    if (!session) return false;
+    if (session.status === 'ready') {
+      void this.completeTravelFlight();
+      return true;
+    }
+    const next = this.intakeEngine.next();
+    if (!next) {
+      this.clearTravelFlightIntake();
+      return false;
+    }
+    this.speak(`好的，我来帮你比机票。${next.question}`);
+    this.scheduleIntakeReminder(session, next.slot);
+    return true;
+  }
+
+  private scheduleIntakeReminder(
+    session: IntakeSession,
+    slot: IntakeSlotSpec,
+  ): void {
+    const sessionId = session.id;
+    this.intakeScheduler.schedule(
+      slot.key,
+      () => {
+        const current = this.intakeEngine.getSession();
+        if (!current || current.id !== sessionId) return;
+        if (this.userStopped || !this.awake || this.userSpeaking) return;
+        this.speak(`还在等你补充${slot.label}。${slot.question}`);
+      },
+      () => {
+        const current = this.intakeEngine.getSession();
+        return (
+          !!current &&
+          current.id === sessionId &&
+          current.status === 'collecting' &&
+          this.awake &&
+          !this.userSpeaking &&
+          !this.ttsSpeaking
+        );
+      },
+    );
+  }
+
+  private clearTravelFlightIntake(): void {
+    this.intakeScheduler.cancelAll();
+    this.intakeEngine.cancel();
+    this.travelFlightCompleting = false;
+  }
+
+  private async completeTravelFlight(): Promise<void> {
+    if (this.travelFlightCompleting) return;
+    const session = this.intakeEngine.getSession();
+    if (!session || session.domain !== TRAVEL_FLIGHT_DOMAIN) return;
+    const origin = String(session.answers.origin || '').trim();
+    const destination = String(session.answers.destination || '').trim();
+    const departDate = String(session.answers.departDate || '').trim();
+    const durationDays = Number(session.answers.durationDays) || undefined;
+    if (!origin || !destination || !departDate) {
+      const next = this.intakeEngine.next();
+      if (next) {
+        this.speak(next.question);
+        this.scheduleIntakeReminder(session, next.slot);
+      }
+      return;
+    }
+
+    this.travelFlightCompleting = true;
+    try {
+      const comparison = compareFlights({
+        origin,
+        destination,
+        departDate,
+        durationDays,
+        passengers: 1,
+      });
+      const speech = formatFlightComparison(comparison);
+      this.intakeScheduler.cancelAll();
+      this.intakeEngine.complete();
+      this.taskSpeechGuardUntil =
+        Date.now() + Math.min(15_000, Math.max(3_000, speech.length * 180));
+      this.speak(speech);
+      const url = comparison.best?.url;
+      if (url) {
+        setTimeout(() => {
+          if (this.userStopped) return;
+          void this.openTravelBooking(url);
+        }, 1_200);
+      }
+    } finally {
+      this.travelFlightCompleting = false;
+    }
+  }
+
+  private async openTravelBooking(url: string): Promise<void> {
+    try {
+      if (this.options.openExternal) {
+        await this.options.openExternal(url);
+        return;
+      }
+      const { openUrl } = await import('./desktop-actions');
+      await openUrl(url);
+    } catch (error) {
+      this.callbacks.onError?.(
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    }
   }
 
   private handleCodingCommand(text: string): boolean {
