@@ -124,6 +124,7 @@ export interface VoiceBrainCallbacks {
 }
 
 export interface VoiceBrainOptions {
+  getGazeInspectionId?: () => string | undefined;
   getGazeActionContext?: (text: string) => GazeActionContext | null;
   inspectGaze?: (question: string) => Promise<string>;
   snoozeProactiveGaze?: (ms?: number) => void;
@@ -153,6 +154,10 @@ const DEFAULT_WAKE_PATTERNS: RegExp[] = [
 ];
 
 const USER_RESPONSE_FALLBACK_MS = 6000;
+const isGazeQuestion = (text: string) =>
+  /(我(?:现在在|正在|在)看什么|我看(?:的|着的)(?:是)?什么|看看我在看|这个是什么|帮我看看这里|识别一下(?:这个|这里|我看的)|我(?:现在|刚才)?注视的是(?:谁|什么))/.test(
+    text,
+  );
 
 const normalize = (text: string) =>
   text
@@ -256,6 +261,8 @@ export class VoiceBrain {
   private userStopped = false;
   private stopToolGuardUntil = 0;
   private taskSpeechGuardUntil = 0;
+  private readoutGuardUntil = 0;
+  private gazeContextTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingBargeStopAt = 0;
   private lastDeterministicControl: {
     kind: 'cancel' | 'pause';
@@ -355,6 +362,7 @@ export class VoiceBrain {
       awake: this.awake,
       userSpeaking: this.userSpeaking,
       ttsSpeaking: this.ttsSpeaking,
+      readoutGuardUntil: this.readoutGuardUntil,
       lastUserText: this.lastUserText,
       task: this.controller.getStatus(),
     };
@@ -365,10 +373,45 @@ export class VoiceBrain {
   }
 
   /** A button/hotkey is an explicit reply request even when voice is asleep. */
-  speakRequestedReply(text: string): void {
+  speakRequestedReply(text: string, readoutId?: string): void {
     this.suppressReplyUntil = 0;
     this.wake();
-    this.speak(text);
+    this.protectGazeReadout();
+    if (readoutId) this.rememberGazeContext(readoutId, text);
+    this.speak(text, readoutId);
+  }
+
+  private rememberGazeContext(id: string, observation: string): void {
+    if (this.gazeContextTimer) clearTimeout(this.gazeContextTimer);
+    this.provider.setGazeContext?.(
+      JSON.stringify({ screenshotId: id, observedAt: Date.now(), observation }),
+    );
+    this.gazeContextTimer = setTimeout(
+      () => this.provider.setGazeContext?.(''),
+      120_000,
+    );
+  }
+
+  submitChatText(text: string): { ok: boolean; error?: string } {
+    if (this.provider.isReady?.() === false)
+      return { ok: false, error: '请先连接语音助手。' };
+    this.wake();
+    this.provider.cancelResponse();
+    const consumed = this.handleTranscript(text.trim(), true);
+    if (!consumed && this.provider.submitText?.(text.trim()) !== true)
+      return { ok: false, error: '语音引擎暂时无法接收消息，请重试。' };
+    return { ok: true };
+  }
+
+  private protectGazeReadout(): void {
+    // Cleared by actual renderer playback-idle, not server response.done:
+    // streamed audio may still have several seconds left in the queue.
+    this.readoutGuardUntil = Date.now() + 45_000;
+    this.notifyState();
+  }
+
+  isReadoutSpeechActive(): boolean {
+    return Date.now() < this.readoutGuardUntil;
   }
 
   clearGazeSuggestion(): void {
@@ -388,9 +431,15 @@ export class VoiceBrain {
       return '正在处理你的请求，完成后恢复主动提醒。';
     return undefined;
   }
-  offerGazeSuggestion(value: GazeSuggestion): void {
+  offerGazeSuggestion(value: GazeSuggestion): boolean {
+    if (
+      this.provider.isReady?.() === false ||
+      this.provider.isConnected?.() === false
+    )
+      return false;
     this.gazeSuggestion = { value, expiresAt: Date.now() + 120_000 };
-    this.speakRequestedReply(value.speech);
+    this.speakRequestedReply(value.speech, value.inspectionId);
+    return true;
   }
   isGazeFollowup(text: string): boolean {
     const pending = this.gazeSuggestion;
@@ -515,12 +564,15 @@ export class VoiceBrain {
    * a short window so it cannot answer with "好的，已暂停…".
    */
   markUserStop(): void {
+    this.readoutGuardUntil = 0;
     this.inspectionGeneration++;
     this.gazeToolTurn = null;
     this.deterministicInspection = null;
     this.lastInspection = null;
     this.gazeActionHandledUntil = 0;
-    this.options.snoozeProactiveGaze?.(60_000);
+    // Stop invalidates the old reply/task, while a NEW gaze target can resume
+    // after the ordinary short cooldown. It does not pause eye tracking for a minute.
+    this.options.snoozeProactiveGaze?.(8_000);
     if (this.gazeSuggestion) {
       this.gazeSuggestion = null;
     }
@@ -548,6 +600,7 @@ export class VoiceBrain {
   }
 
   sleep(): void {
+    this.readoutGuardUntil = 0;
     this.inspectionGeneration++;
     if (!this.awake) {
       return;
@@ -560,6 +613,7 @@ export class VoiceBrain {
   }
 
   dispose(): void {
+    if (this.gazeContextTimer) clearTimeout(this.gazeContextTimer);
     this.inspectionGeneration++;
     this.clearAwakeTimer();
     this.clearPlaybackWatchdog();
@@ -592,10 +646,12 @@ export class VoiceBrain {
         }
         this.userSpeaking = true;
         this.userSpeechStartedAt = Date.now();
-        this.ttsSpeaking = false;
-        this.clearPlaybackWatchdog();
+        if (!this.isReadoutSpeechActive()) {
+          this.ttsSpeaking = false;
+          this.clearPlaybackWatchdog();
+        }
         this.proactivity.setUserSpeaking(true);
-        this.proactivity.setTtsSpeaking(false);
+        this.proactivity.setTtsSpeaking(this.ttsSpeaking);
         this.callbacks.onSpeechStarted?.();
         this.notifyState();
       },
@@ -661,7 +717,8 @@ export class VoiceBrain {
           this.callbacks.onAudio?.(pcm16);
         }
       },
-      onResponseStarted: () => {
+      onResponseStarted: (info) => {
+        if (info?.readoutId) this.protectGazeReadout();
         if (this.shouldSuppressReply()) {
           console.log('[cyrvis voice] suppressed reply after stop command');
           this.provider.cancelResponse();
@@ -718,12 +775,15 @@ export class VoiceBrain {
         }
       },
       onPlaybackIdle: () => {
+        this.readoutGuardUntil = 0;
         this.clearPlaybackWatchdog();
         this.ttsSpeaking = false;
         this.proactivity.setTtsSpeaking(false);
         this.notifyState();
       },
       onError: (error) => {
+        this.readoutGuardUntil = 0;
+        this.notifyState();
         this.callbacks.onError?.(error);
         if (this.waitingForUserResponse && !this.userResponseOutputSeen) {
           this.markUserResponseOutput();
@@ -972,6 +1032,7 @@ export class VoiceBrain {
           decision.kind === 'control' ||
           canHandleFastTool ||
           !!desktopAction ||
+          (!!this.options.inspectGaze && isGazeQuestion(text)) ||
           ((voiceIntent.mode === 'search' ||
             voiceIntent.mode === 'compare' ||
             voiceIntent.mode === 'answer') &&
@@ -1006,12 +1067,7 @@ export class VoiceBrain {
 
     // Consume gaze questions before fast tools. Cascade must skip its own
     // LLM turn when this handler returns true.
-    if (
-      this.options.inspectGaze &&
-      /(我(?:现在在|正在|在)看什么|我看(?:的|着的)(?:是)?什么|看看我在看|这个是什么|帮我看看这里)/.test(
-        text,
-      )
-    ) {
+    if (this.options.inspectGaze && isGazeQuestion(text)) {
       this.provider.cancelResponse();
       this.markUserResponseOutput();
       const request = {
@@ -1028,7 +1084,10 @@ export class VoiceBrain {
             !request.toolReply
           ) {
             request.answered = true;
-            this.speak(answer);
+            this.speakRequestedReply(
+              answer,
+              this.options.getGazeInspectionId?.(),
+            );
           }
         },
         (error) => {
@@ -1640,11 +1699,16 @@ export class VoiceBrain {
             : this.inspectGaze(
                 call.args.question || this.lastUserText || '我在看什么？',
               ));
-          if (this.awake && generation === this.inspectionGeneration)
+          if (this.awake && generation === this.inspectionGeneration) {
+            this.protectGazeReadout();
+            const readoutId = this.options.getGazeInspectionId?.();
+            if (readoutId) this.rememberGazeContext(readoutId, answer);
             this.provider.sendToolResult(
               call.callId,
               JSON.stringify({ ok: true, answer, read_only: true }),
+              this.options.getGazeInspectionId?.(),
             );
+          }
         } catch (error) {
           if (this.awake && generation === this.inspectionGeneration)
             this.provider.sendToolResult(
@@ -3311,34 +3375,43 @@ export class VoiceBrain {
     this.speak(text);
   }
 
-  private speak(text: string): void {
+  private speak(text: string, readoutId?: string): void {
     if (!this.awake) return;
     this.taskConversation.noteAssistantOutput();
     this.markUserResponseOutput();
     this.ttsSpeaking = true;
     this.proactivity.setTtsSpeaking(true);
-    this.provider.speak(text);
+    if (readoutId) this.provider.speak(text, readoutId);
+    else this.provider.speak(text);
     this.notifyState();
 
     if (this.speakWatchdog) {
       clearTimeout(this.speakWatchdog);
     }
-    this.speakWatchdog = setTimeout(() => {
-      this.ttsSpeaking = false;
-      this.proactivity.setTtsSpeaking(false);
-      this.notifyState();
-    }, 15_000);
+    this.speakWatchdog = setTimeout(
+      () => {
+        this.readoutGuardUntil = 0;
+        this.ttsSpeaking = false;
+        this.proactivity.setTtsSpeaking(false);
+        this.notifyState();
+      },
+      this.isReadoutSpeechActive() ? 45_000 : 15_000,
+    );
   }
 
   private armPlaybackWatchdog(): void {
     this.clearPlaybackWatchdog();
-    this.playbackWatchdog = setTimeout(() => {
-      this.playbackWatchdog = null;
-      console.warn('[cyrvis voice] playback idle watchdog fired');
-      this.ttsSpeaking = false;
-      this.proactivity.setTtsSpeaking(false);
-      this.notifyState();
-    }, 15_000);
+    this.playbackWatchdog = setTimeout(
+      () => {
+        this.playbackWatchdog = null;
+        console.warn('[cyrvis voice] playback idle watchdog fired');
+        this.readoutGuardUntil = 0;
+        this.ttsSpeaking = false;
+        this.proactivity.setTtsSpeaking(false);
+        this.notifyState();
+      },
+      this.isReadoutSpeechActive() ? 45_000 : 15_000,
+    );
   }
 
   private clearPlaybackWatchdog(): void {

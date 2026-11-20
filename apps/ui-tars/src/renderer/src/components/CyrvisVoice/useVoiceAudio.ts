@@ -203,6 +203,9 @@ export function useVoiceAudio() {
   const keywordPcmRef = useRef(new Uint8Array());
   const bargePrerollRef = useRef<Float32Array[]>([]);
   const assistantSpeakingRef = useRef(false);
+  const readoutGuardUntilRef = useRef(0);
+  const readoutIdRef = useRef<string | undefined>(undefined);
+  const readoutPlayingRef = useRef(false);
   const assistantPlaybackStartedAtRef = useRef(0);
   const speechDeltaRef = useRef('');
   const speechDeltaSeenRef = useRef(false);
@@ -229,6 +232,10 @@ export function useVoiceAudio() {
   };
 
   const finishPlayback = useCallback(() => {
+    if (readoutIdRef.current)
+      window.electron.voice.reportGazePlayback(readoutIdRef.current, 'spoken');
+    readoutIdRef.current = undefined;
+    readoutPlayingRef.current = false;
     clearIdleTimer();
     legacyPlayerRef.current = null;
     assistantSpeakingRef.current = false;
@@ -240,6 +247,13 @@ export function useVoiceAudio() {
   }, []);
 
   const cancelPlayer = useCallback((notifyMain = false) => {
+    if (readoutIdRef.current)
+      window.electron.voice.reportGazePlayback(
+        readoutIdRef.current,
+        'cancelled',
+      );
+    readoutIdRef.current = undefined;
+    readoutPlayingRef.current = false;
     playerEpochRef.current += 1;
     const player = playerRef.current;
     playerRef.current = null;
@@ -276,6 +290,13 @@ export function useVoiceAudio() {
         mode: current.voiceQwenTtsMode || 'commit',
         language: current.voiceQwenTtsLanguage || 'Chinese',
         onFirstAudio: () => {
+          if (readoutIdRef.current && !readoutPlayingRef.current) {
+            readoutPlayingRef.current = true;
+            window.electron.voice.reportGazePlayback(
+              readoutIdRef.current,
+              'playing',
+            );
+          }
           resolveFirstAudioRef.current?.(true);
           resolveFirstAudioRef.current = null;
         },
@@ -302,6 +323,13 @@ export function useVoiceAudio() {
         cfgScale: current.voiceTtsCfgScale ?? 1,
         seed: current.voiceTtsSeed ?? BREEZE_TTS_DEFAULT_SEED,
         onFirstAudio: () => {
+          if (readoutIdRef.current && !readoutPlayingRef.current) {
+            readoutPlayingRef.current = true;
+            window.electron.voice.reportGazePlayback(
+              readoutIdRef.current,
+              'playing',
+            );
+          }
           resolveFirstAudioRef.current?.(true);
           resolveFirstAudioRef.current = null;
         },
@@ -346,6 +374,12 @@ export function useVoiceAudio() {
             : String(playerError);
         console.error('[cyrvis] streaming TTS failed', message);
         setError(message);
+        if (readoutIdRef.current)
+          window.electron.voice.reportGazePlayback(
+            readoutIdRef.current,
+            'failed',
+            message,
+          );
         assistantSpeakingRef.current = false;
         setPlaybackActive(false);
         window.electron.voice.notifyPlaybackIdle();
@@ -436,6 +470,13 @@ export function useVoiceAudio() {
       }
 
       if (assistantSpeakingRef.current) {
+        // Keep the keyword audio path above live for an explicit "停一下".
+        // Energy alone cannot distinguish the user's voice from this readout
+        // leaking back through the laptop mic, even in headset UI mode.
+        if (Date.now() < readoutGuardUntilRef.current) {
+          bargeFramesRef.current = 0;
+          return;
+        }
         bargePrerollRef.current = appendAudioPreroll(
           bargePrerollRef.current,
           input,
@@ -581,6 +622,7 @@ export function useVoiceAudio() {
       const output = outputDevices.find((item) => item.deviceId === deviceId);
       if (output) {
         await window.electron.voice.setOutput(output.label);
+        await legacyPlayerRef.current?.setSinkId(deviceId);
       }
     },
     [outputDevices],
@@ -868,21 +910,55 @@ export function useVoiceAudio() {
         assistantSpeakingRef.current = true;
         setPlaybackActive(true);
         if (!legacyPlayerRef.current) {
+          const epoch = playerEpochRef.current;
+          const id = readoutIdRef.current;
           legacyPlayerRef.current = new WebAudioStreamPlayer(
             finishPlayback,
-            (audioError) =>
-              console.warn('[cyrvis] omni audio error', audioError),
+            (audioError) => {
+              if (epoch !== playerEpochRef.current) return;
+              const message =
+                audioError instanceof Error
+                  ? audioError.message
+                  : String(audioError);
+              if (id)
+                window.electron.voice.reportGazePlayback(id, 'failed', message);
+              setError(message);
+              cancelPlayer(true);
+            },
+            (samples, startedAt) => {
+              if (epoch !== playerEpochRef.current) return;
+              window.electron.voice.sendPlaybackReference(
+                samples.slice().buffer as ArrayBuffer,
+                startedAt,
+              );
+              if (id && !readoutPlayingRef.current) {
+                readoutPlayingRef.current = true;
+                window.electron.voice.reportGazePlayback(id, 'playing');
+              }
+            },
           );
+          const player = legacyPlayerRef.current;
+          if (outputDeviceIdRef.current)
+            void player.setSinkId(outputDeviceIdRef.current).catch((error) => {
+              if (epoch !== playerEpochRef.current) return;
+              const message =
+                error instanceof Error ? error.message : String(error);
+              if (id)
+                window.electron.voice.reportGazePlayback(id, 'failed', message);
+              setError(message);
+              cancelPlayer(true);
+            });
         }
         legacyPlayerRef.current.play(pcm16);
       }),
-      window.electron.voice.onResponseStarted(() => {
+      window.electron.voice.onResponseStarted((info) => {
         setAssistantText('');
         console.info('[cyrvis] response started', {
           engine: settingsRef.current.voiceEngine,
           ttsProvider: settingsRef.current.voiceTtsProvider,
         });
         cancelPlayer();
+        readoutIdRef.current = info?.readoutId;
         playerEpochRef.current += 1;
         if (settingsRef.current.voiceEngine !== 'omni') {
           assistantSpeakingRef.current = true;
@@ -985,6 +1061,7 @@ export function useVoiceAudio() {
         }
       }),
       window.electron.voice.onState((next) => {
+        readoutGuardUntilRef.current = next.readoutGuardUntil || 0;
         setState(next as VoiceUiState);
       }),
       window.electron.voice.onWake(() => {

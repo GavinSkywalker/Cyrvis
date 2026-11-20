@@ -68,6 +68,9 @@ const setup = (model?: string, endpoint?: string) => {
     onReady: vi.fn(),
     onAudio: vi.fn(),
     onToolCall: vi.fn(),
+    onReadoutState: vi.fn(),
+    onResponseStarted: vi.fn(),
+    onAssistantText: vi.fn(),
   };
   const provider = new QwenOmniProvider({
     apiKey: 'test-key',
@@ -92,6 +95,78 @@ const sent = (socket: FakeWebSocket) =>
   socket.send.mock.calls.map(([data]) => JSON.parse(data));
 
 describe('Qwen companion voices', () => {
+  it('records one assistant turn when both text and audio transcript events are emitted', async () => {
+    const { provider, callbacks } = setup('qwen-audio-3.0-realtime-plus');
+    const connected = provider.connect();
+    sockets[0].ready();
+    await connected;
+    receive(sockets[0], { type: 'response.created' });
+    receive(sockets[0], {
+      type: 'response.text.delta',
+      delta: '我来帮你播放。',
+    });
+    receive(sockets[0], { type: 'response.text.done', text: '我来帮你播放。' });
+    receive(sockets[0], {
+      type: 'response.audio_transcript.delta',
+      delta: '我来帮你播放。',
+    });
+    receive(sockets[0], {
+      type: 'response.audio_transcript.done',
+      transcript: '我来帮你播放。',
+    });
+    expect(
+      callbacks.onAssistantText.mock.calls.filter((call) => call[1]),
+    ).toEqual([['我来帮你播放。', true]]);
+  });
+  it('correlates queued screenshot speech with its generated audio, without claiming device playback', async () => {
+    const { provider, callbacks } = setup('qwen-audio-3.0-realtime-plus');
+    const connected = provider.connect();
+    sockets[0].ready();
+    await connected;
+    provider.speak('这里是音乐封面。', 'shot-a');
+    expect(callbacks.onReadoutState).toHaveBeenCalledWith('shot-a', 'queued');
+    receive(sockets[0], { type: 'response.created', response_id: 'voice-a' });
+    expect(callbacks.onResponseStarted).toHaveBeenCalledWith({
+      readoutId: 'shot-a',
+    });
+    receive(sockets[0], {
+      type: 'response.audio.delta',
+      delta: Buffer.from(new Int16Array([10, 20]).buffer).toString('base64'),
+    });
+    expect(callbacks.onReadoutState).toHaveBeenCalledWith('shot-a', 'audio');
+    expect(
+      callbacks.onReadoutState.mock.calls.some((call) =>
+        ['playing', 'spoken'].includes(call[1]),
+      ),
+    ).toBe(false);
+  });
+
+  it('keeps the screenshot context when memory refreshes and reports a missing audio response', async () => {
+    const { provider, callbacks } = setup('qwen-audio-3.0-realtime-plus');
+    const connected = provider.connect();
+    sockets[0].ready();
+    await connected;
+    provider.setGazeContext(
+      '{"screenshotId":"shot-a","observation":"TEST ALBUM"}',
+    );
+    provider.setContext('用户偏好轻音乐');
+    const updates = sent(sockets[0]).filter(
+      (item) => item.type === 'session.update',
+    );
+    expect(updates.at(-1).session.instructions).toContain('TEST ALBUM');
+    expect(updates.at(-1).session.instructions).toContain('轻音乐');
+    provider.speak('这里是 TEST ALBUM。', 'shot-a');
+    receive(sockets[0], { type: 'response.created' });
+    receive(sockets[0], {
+      type: 'response.done',
+      response: { status: 'completed' },
+    });
+    expect(callbacks.onReadoutState).toHaveBeenCalledWith(
+      'shot-a',
+      'failed',
+      expect.stringContaining('没有返回可播放音频'),
+    );
+  });
   it('can speak first in a fresh Audio session by creating a read-only input before response.create', async () => {
     const { provider } = setup('qwen-audio-3.0-realtime-plus');
     const connected = provider.connect();

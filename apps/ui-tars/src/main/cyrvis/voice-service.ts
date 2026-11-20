@@ -1,3 +1,4 @@
+import { gazeChat } from './gaze/chat';
 import { DesktopGazeCursor } from './gaze/cursor';
 import { gazeInspector } from './gaze/desktop-inspector';
 import { getDesktopGaze, setDesktopGaze } from './gaze/context';
@@ -68,16 +69,32 @@ interface VoiceService {
 
 let service: VoiceService | null = null;
 let lastGazeVoiceActivityAt = 0;
+let activeVoiceReadoutId: string | undefined;
+let replayedGazeId: string | undefined;
+gazeChat.subscribe((turn) => {
+  if (turn.phase === 'capturing') replayedGazeId = undefined;
+  broadcast('cyrvis:gaze:chat-turn', turn);
+});
+const speakGazeAnswer = (answer: string) => {
+  const id = gazeInspector.getStatus().id;
+  if (!service) {
+    if (id) gazeChat.speech(id, 'failed', '请先开启语音助手，再点击重新播报。');
+    return;
+  }
+  if (id) service.brain.speakRequestedReply(answer, id);
+  else service.brain.speakRequestedReply(answer);
+};
 const proactiveGaze = new ProactiveGaze({
   onEvent: (event, detail) =>
     logger.info('[cyrvis gaze proactive]', { event, detail }),
-  inspect: () => gazeInspector.suggest(),
+  inspect: (gaze) => gazeInspector.suggest(gaze),
   cancel: () => gazeInspector.cancelProactive(),
   canInspect: () => !proactiveGazeBlockReason(),
   blockedReason: () => proactiveGazeBlockReason() || '',
   onSuggestion: (suggestion) => {
-    service?.brain.offerGazeSuggestion(suggestion);
+    if (!service?.brain.offerGazeSuggestion(suggestion)) return false;
     emitActivity('speech', suggestion.speech);
+    return true;
   },
 });
 function proactiveGazeBlockReason(): string | undefined {
@@ -140,6 +157,14 @@ export const speakProactiveText = (text: string): boolean => {
   service.provider.speak(text);
   return true;
 };
+
+/** Historical greetings must yield to the current object/question/readout. */
+export const shouldDeferFollowUpSpeech = (): boolean =>
+  !!service &&
+  (assistantPlaybackActive ||
+    service.brain.isReadoutSpeechActive() ||
+    !!service.brain.gazeSuggestionBlockReason() ||
+    ['inspecting', 'waiting'].includes(proactiveGaze.getStatus().phase));
 
 /** Show locally spoken proactive text in the voice conversation as well. */
 export const publishProactiveText = (text: string): void => {
@@ -1249,6 +1274,41 @@ const registerVoiceIpc = () => {
       action as GazeAction | 'dismiss',
     );
   });
+  ipcMain.handle('cyrvis:gaze:chat-turns', () => gazeChat.recent());
+  ipcMain.handle('cyrvis:voice:submit-text', (_event, text) => {
+    if (typeof text !== 'string' || !text.trim() || text.length > 6000)
+      return { ok: false, error: '消息为空或过长。' };
+    broadcast('cyrvis:voice:response-stopped');
+    return (
+      service?.brain.submitChatText(text) || {
+        ok: false,
+        error: '请先开启语音助手。',
+      }
+    );
+  });
+  ipcMain.handle('cyrvis:gaze:replay', (_event, id) => {
+    const turn = typeof id === 'string' ? gazeChat.get(id) : undefined;
+    if (!turn?.answer || !service)
+      return { ok: false, error: '没有可重播的识别结果，或语音助手尚未开启。' };
+    if (service.provider.isReady?.() === false)
+      return { ok: false, error: '语音正在连接，请稍后重播。' };
+    service.provider.cancelResponse();
+    broadcast('cyrvis:voice:response-stopped');
+    replayedGazeId = turn.id;
+    service.brain.speakRequestedReply(turn.answer, turn.id);
+    return { ok: true };
+  });
+  ipcMain.on('cyrvis:gaze:playback', (_event, id, phase, error) => {
+    if (
+      typeof id === 'string' &&
+      ['playing', 'spoken', 'failed', 'cancelled'].includes(String(phase))
+    )
+      gazeChat.speech(
+        id,
+        phase as 'playing' | 'spoken' | 'failed' | 'cancelled',
+        typeof error === 'string' ? error.slice(0, 300) : undefined,
+      );
+  });
   ipcMain.handle('cyrvis:gaze:inspection-status', () =>
     gazeInspector.getStatus(),
   );
@@ -1257,7 +1317,7 @@ const registerVoiceIpc = () => {
     service?.brain.clearGazeSuggestion();
     try {
       const answer = await gazeInspector.inspect();
-      service?.brain.speakRequestedReply(answer);
+      speakGazeAnswer(answer);
     } catch {
       /* Error is displayed in the inspection panel. */
     }
@@ -1269,7 +1329,7 @@ const registerVoiceIpc = () => {
     void gazeInspector
       .inspect()
       .then((answer) => {
-        service?.brain.speakRequestedReply(answer);
+        speakGazeAnswer(answer);
       })
       .catch((error) => {
         service?.brain.speakRequestedReply(
@@ -1745,6 +1805,10 @@ const registerVoiceIpc = () => {
     if (!service) {
       return;
     }
+    if (service.brain.isReadoutSpeechActive()) {
+      logger.info('[cyrvis gaze] ignored energy-only interruption of readout');
+      return;
+    }
     const runBarge = () => {
       if (!service) {
         return;
@@ -1980,7 +2044,11 @@ export const startVoiceService = (): VoiceService | null => {
       onAssistantText: (text, final) => {
         lastGazeVoiceActivityAt = Date.now();
         logger.info('[cyrvis voice] assistant text', { text, final });
-        broadcast('cyrvis:voice:assistant', { text, final });
+        broadcast('cyrvis:voice:assistant', {
+          text,
+          final,
+          gazeTurnId: activeVoiceReadoutId,
+        });
         lastAssistantAt = Date.now();
         lastAssistantText = final ? text : `${lastAssistantText}${text}`;
         if (final) {
@@ -2099,7 +2167,9 @@ export const startVoiceService = (): VoiceService | null => {
           }
           return callbacks.onTranscript?.(text, final);
         },
-        onResponseStarted: () => {
+        onReadoutState: (id, phase, error) => gazeChat.speech(id, phase, error),
+        onResponseStarted: (info) => {
+          activeVoiceReadoutId = info?.readoutId;
           if (service?.brain.shouldSuppressReply()) {
             logger.info('[cyrvis voice] suppress reply after stop command');
             service.provider.cancelResponse();
@@ -2130,9 +2200,9 @@ export const startVoiceService = (): VoiceService | null => {
           // Never carry playback-tail audio into the next ASR turn, regardless
           // of which output mode the UI currently reports.
           service?.provider.clearAudioBuffer();
-          broadcast('cyrvis:voice:response-started');
+          broadcast('cyrvis:voice:response-started', info);
           emitActivity('speech', '助手开始流式回答');
-          callbacks.onResponseStarted?.();
+          callbacks.onResponseStarted?.(info);
         },
         onResponseDone: () => {
           // Tool-call-only responses produce no audio. Tell the renderer so
@@ -2141,6 +2211,7 @@ export const startVoiceService = (): VoiceService | null => {
           broadcast('cyrvis:voice:response-done');
           emitActivity('speech', '助手回答完成');
           callbacks.onResponseDone?.();
+          activeVoiceReadoutId = undefined;
         },
         onUtteranceCommitted: () => {
           if (pttMode && pttActive) {
@@ -2174,6 +2245,12 @@ export const startVoiceService = (): VoiceService | null => {
           callbacks.onToolCall?.(call);
         },
         onError: (error: Error) => {
+          if (activeVoiceReadoutId)
+            gazeChat.speech(
+              activeVoiceReadoutId,
+              'failed',
+              '语音模型返回错误，请检查语音连接后重新播报。',
+            );
           logger.error('[cyrvis voice] provider error', error);
           broadcast('cyrvis:voice:error', { message: error.message });
           emitActivity('error', `语音模型错误：${error.message}`);
@@ -2207,6 +2284,9 @@ export const startVoiceService = (): VoiceService | null => {
     {
       requireWakeWord,
       getGazeActionContext: (text) => {
+        const replayed = replayedGazeId && gazeChat.getGaze(replayedGazeId);
+        if (replayed && Date.now() - replayed.at < 120_000)
+          return { gaze: replayed, observedAt: replayed.at };
         const inspection = gazeInspector.getStatus(),
           suggestion = proactiveGaze.getStatus().suggestion;
         const display = screen.getPrimaryDisplay();
@@ -2235,6 +2315,7 @@ export const startVoiceService = (): VoiceService | null => {
           ),
         );
       },
+      getGazeInspectionId: () => gazeInspector.getStatus().id,
       inspectGaze: (question) => {
         proactiveGaze.snooze();
         return gazeInspector.inspect(question);

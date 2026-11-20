@@ -17,6 +17,7 @@ const mock = vi.hoisted(() => ({
   wake: vi.fn(),
   speakReply: vi.fn(),
   offerSuggestion: vi.fn(),
+  readoutActive: false,
   objectScan: vi.fn(async () => ({ scene: 'test', objects: [] as any[] })),
   start: vi.fn(async () => undefined),
   captureClose: vi.fn(),
@@ -146,6 +147,8 @@ vi.mock('./voice-brain', () => ({
     forceAwake = mock.wake;
     speakRequestedReply = mock.speakReply;
     clearGazeSuggestion = vi.fn();
+    isReadoutSpeechActive = () => mock.readoutActive;
+    handleBargeStop = vi.fn();
     isGazeFollowup = () => false;
     canOfferGazeSuggestion = () => true;
     gazeSuggestionBlockReason = () => undefined;
@@ -164,6 +167,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   mock.skinId = undefined;
   mock.capture = null;
+  mock.readoutActive = false;
+  mock.offerSuggestion.mockReturnValue(true);
   mock.objectScan.mockResolvedValue({ scene: 'test', objects: [] });
   mock.skinListeners.clear();
   vi.useFakeTimers();
@@ -175,6 +180,17 @@ it('starts with the saved companion voice instead of the default', async () => {
   const { startVoiceService } = await import('./voice-service');
   startVoiceService();
   expect(mock.config!.voice).toBe('Raymond');
+});
+
+it('rejects energy-only interruption of gaze readout and defers historical greeting speech', async () => {
+  const { startVoiceService, shouldDeferFollowUpSpeech } = await import(
+    './voice-service'
+  );
+  startVoiceService();
+  mock.readoutActive = true;
+  mock.events.get('cyrvis:voice:cancel-speech-only')!();
+  expect(mock.provider.bargeIn).not.toHaveBeenCalled();
+  expect(shouldDeferFollowUpSpeech()).toBe(true);
 });
 
 it('routes a gaze-button answer through the brain so sleeping voice can speak it', async () => {
