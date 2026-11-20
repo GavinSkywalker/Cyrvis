@@ -1090,6 +1090,7 @@ export class VoiceBrain {
       return true;
     }
 
+    this.rememberTravelSelection(text);
     if (this.handleTravelFlightCommand(text)) {
       return true;
     }
@@ -1206,6 +1207,23 @@ export class VoiceBrain {
     }
     this.speak(this.taskConversation.describeStatus());
     return true;
+  }
+
+  /**
+   * Capture “就三亚吧” when the assistant just listed that city. The model can
+   * still call travel_update_plan; this only preserves context for a following
+   * “去这/买机票” turn if the tool call is missed.
+   */
+  private rememberTravelSelection(text: string): void {
+    if (this.intakeEngine.getSession()) return;
+    const match = text
+      .trim()
+      .match(/^(?:就|选|要|定)([一-龥]{2,8})(?:吧|了|呀)?$/);
+    if (!match?.[1] || !this.lastAssistantText.includes(match[1])) return;
+    travelPlanner.updateFramework({
+      destination: match[1],
+      userText: text,
+    });
   }
 
   private handleTravelFlightCommand(text: string): boolean {

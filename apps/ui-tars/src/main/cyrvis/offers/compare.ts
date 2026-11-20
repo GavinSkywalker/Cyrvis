@@ -92,8 +92,12 @@ export const rankOffers = (
   );
 
   const best = ranked[0];
-  const reasons = best.reasons.length ? best.reasons : ['综合价格和条件最优'];
+  const reasons = best.reasons.length
+    ? [...best.reasons]
+    : ['综合价格和条件最优'];
   if (best && ranked[1] && best.totalPrice < ranked[1].totalPrice) {
+    const cheapestIndex = reasons.indexOf('总价最低');
+    if (cheapestIndex >= 0) reasons.splice(cheapestIndex, 1);
     reasons.unshift(
       `比第二名便宜 ${ranked[1].totalPrice - best.totalPrice} 元`,
     );

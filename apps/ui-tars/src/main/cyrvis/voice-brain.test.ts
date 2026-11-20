@@ -711,6 +711,21 @@ describe('VoiceBrain', () => {
     expect(provider.toolResults[0].output).toContain('去巴黎的机票');
   });
 
+  it('remembers a city selected from the assistant recommendation', async () => {
+    const { brain, provider } = setup({ requireWakeWord: false });
+    await brain.start();
+    provider.callbacks.onAssistantText?.(
+      '推荐三亚、厦门、青岛，都有海，也都适合现在去。',
+      true,
+    );
+    provider.emitTranscript('就三亚吧', true);
+    await flush();
+    provider.emitTranscript('我要买一张去这的机票', true);
+    await flush();
+
+    expect(provider.spoken.at(-1)).toContain('从哪个城市出发');
+  });
+
   it('collects flight details and opens the recommended booking page', async () => {
     const opened: string[] = [];
     const { brain, provider } = setup({
