@@ -97,13 +97,20 @@ export const parseTravelDestination = (
   const patterns = [
     /(?:买|订|查|比价)?(?:一张)?(?:去|到|飞往)([一-龥]{2,10}?)(?:的)?(?:机票|航班|飞机票)/,
     /(?:去|到|飞往)([一-龥]{2,10}?)(?:玩|旅游|旅行|度假|的机票)/,
+    /(?:去|到|飞往)([一-龥]{2,10})$/,
+    /([一-龥]{2,8})(?:的)?(?:机票|航班|飞机票)/,
     /(?:就|选|定|要)([一-龥]{2,8})(?:吧|了|呀)?$/,
   ];
   for (const pattern of patterns) {
     const match = raw.match(pattern);
     if (match?.[1]) {
       const city = cleanCity(match[1]);
-      if (city && !/^(?:这|这里|那里|哪里|哪儿|哪个|什么)$/.test(city)) {
+      if (
+        city &&
+        !/(?:这|这里|那里|哪里|哪儿|哪个|什么|一张|机票|航班|比价|帮|我|想|要|去|到|飞|买|订|查)/.test(
+          city,
+        )
+      ) {
         return city;
       }
     }
@@ -339,14 +346,14 @@ export const formatFlightComparison = (
     ? `含${best.conditions.baggageKg}kg行李`
     : '无免费托运行李';
   const refund = best.conditions.refundable ? '可退改' : '特价不可退改';
-  const reasons = comparison.reasons.length
-    ? comparison.reasons.join('，')
-    : '综合价格和条件最优';
+  const savings = comparison.reasons.find((reason) =>
+    reason.startsWith('比第二名'),
+  );
   const tripLabel =
     comparison.input.durationDays && comparison.returnDate
       ? `往返${comparison.input.durationDays}天`
       : '单程';
-  return `我比了 ${comparison.ranked.length} 个平台。前三名：${top}。最低是${best.provider} ${best.totalPrice} 元，${direct}，${baggage}，${refund}。${tripLabel}，${reasons}，我建议选${best.provider}。`;
+  return `我比了 ${comparison.ranked.length} 个平台。前三名：${top}。最低是${best.provider} ${best.totalPrice} 元，${tripLabel}，${direct}${baggage}、${refund}。${savings ? `${savings}，` : ''}我建议选${best.provider}。`;
 };
 
 export const TRAVEL_FLIGHT_SLOTS: IntakeSlotSpec[] = [

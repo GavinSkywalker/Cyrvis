@@ -1218,7 +1218,7 @@ export class VoiceBrain {
     if (this.intakeEngine.getSession()) return;
     const match = text
       .trim()
-      .match(/^(?:就|选|要|定)([一-龥]{2,8})(?:吧|了|呀)?$/);
+      .match(/^(?:就|选|要|定)([一-龥]{2,8}?)(?:吧|了|呀)?$/);
     if (!match?.[1] || !this.lastAssistantText.includes(match[1])) return;
     travelPlanner.updateFramework({
       destination: match[1],

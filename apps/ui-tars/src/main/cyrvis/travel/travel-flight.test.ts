@@ -17,6 +17,8 @@ import {
 describe('travel flight slots', () => {
   it('parses destination, origin, date and duration from natural language', () => {
     expect(parseTravelDestination('我要买一张去三亚的机票')).toBe('三亚');
+    expect(parseTravelDestination('帮我订张机票去三亚')).toBe('三亚');
+    expect(parseTravelDestination('三亚机票怎么买')).toBe('三亚');
     expect(parseTravelDestination('就厦门吧', true)).toBe('厦门');
     expect(parseTravelOrigin('从北京出发')).toBe('北京');
     expect(parseTravelOrigin('北京', true)).toBe('北京');
