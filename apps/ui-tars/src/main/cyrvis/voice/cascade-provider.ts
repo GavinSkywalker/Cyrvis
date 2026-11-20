@@ -66,7 +66,9 @@ export class CascadeVoiceProvider implements InteractiveVoiceProvider {
   private conversationAbort: AbortController | null = null;
   private responseActive = false;
   private responseStarted = false;
-  private pendingSpeak: string | null = null;
+  private pendingSpeak: string[] = [];
+  private playbackBusy = false;
+  private playbackFallback: ReturnType<typeof setTimeout> | null = null;
 
   constructor(callbacks: VoiceProviderCallbacks, tools?: QwenToolDefinition[]) {
     this.callbacks = callbacks;
@@ -421,7 +423,7 @@ export class CascadeVoiceProvider implements InteractiveVoiceProvider {
               return;
             }
             this.ensureResponseStarted();
-            this.callbacks.onSpeechText?.(delta, false);
+            this.emitSpeechText(delta, false);
           },
           onToolCall: (call) => {
             if (generation === this.generation && !abort.signal.aborted) {
@@ -438,7 +440,7 @@ export class CascadeVoiceProvider implements InteractiveVoiceProvider {
       const finalSpeechText = cleanSpeechText(finalText);
       if (finalSpeechText) {
         this.ensureResponseStarted();
-        this.callbacks.onSpeechText?.(finalSpeechText, true);
+        this.emitSpeechText(finalSpeechText, true);
       }
       this.callbacks.onResponseDone?.();
     } catch (error) {
@@ -458,11 +460,7 @@ export class CascadeVoiceProvider implements InteractiveVoiceProvider {
       if (generation === this.generation) {
         this.responseActive = false;
         this.responseStarted = false;
-        const next = this.pendingSpeak;
-        this.pendingSpeak = null;
-        if (next && cleanSpeechText(next)) {
-          this.speak(next);
-        }
+        this.pumpPendingSpeech();
       }
     }
   }
@@ -517,7 +515,9 @@ export class CascadeVoiceProvider implements InteractiveVoiceProvider {
     this.conversationAbort?.abort();
     this.conversationAbort = null;
     this.conversation.cancelPendingToolResults(abortError());
-    this.pendingSpeak = null;
+    this.pendingSpeak = [];
+    this.playbackBusy = false;
+    this.clearPlaybackFallback();
     this.responseActive = false;
     this.responseStarted = false;
     if (this.asrSessionId) {
@@ -555,7 +555,10 @@ export class CascadeVoiceProvider implements InteractiveVoiceProvider {
   }
 
   notifyPlaybackIdle(_tailMs = 0): void {
+    this.playbackBusy = false;
+    this.clearPlaybackFallback();
     this.callbacks.onPlaybackIdle?.();
+    this.pumpPendingSpeech();
   }
 
   endPtt(): void {
@@ -571,8 +574,8 @@ export class CascadeVoiceProvider implements InteractiveVoiceProvider {
     if (!speech) {
       return;
     }
-    if (this.responseActive) {
-      this.pendingSpeak = speech;
+    if (this.responseActive || this.playbackBusy) {
+      this.pendingSpeak.push(speech);
       return;
     }
     this.generation += 1;
@@ -580,17 +583,68 @@ export class CascadeVoiceProvider implements InteractiveVoiceProvider {
     this.responseStarted = false;
     this.ensureResponseStarted();
     this.callbacks.onAssistantText?.(speech, true);
-    this.callbacks.onSpeechText?.(speech, true);
+    this.emitSpeechText(speech, true);
     this.callbacks.onResponseDone?.();
     this.responseActive = false;
     this.responseStarted = false;
   }
 
+  cancelPendingSpeech(): void {
+    this.pendingSpeak = [];
+  }
+
   close(): void {
     this.closed = true;
     this.connected = false;
+    this.pendingSpeak = [];
+    this.playbackBusy = false;
+    this.clearPlaybackFallback();
     this.cancelResponse();
     this.asr.stopAll();
     this.callbacks.onClose?.();
+  }
+
+  private emitSpeechText(text: string, final: boolean): void {
+    if (!cleanSpeechText(text)) {
+      return;
+    }
+    this.playbackBusy = true;
+    this.armPlaybackFallback(text);
+    this.callbacks.onSpeechText?.(text, final);
+  }
+
+  private pumpPendingSpeech(): void {
+    const next = this.pendingSpeak[0];
+    if (!next || !this.connected || this.responseActive || this.playbackBusy) {
+      return;
+    }
+    this.pendingSpeak.shift();
+    this.speak(next);
+  }
+
+  private armPlaybackFallback(text: string): void {
+    this.clearPlaybackFallback();
+    const estimatedMs = Math.max(
+      5_000,
+      Math.min(90_000, Array.from(text).length * 320 + 3_000),
+    );
+    this.playbackFallback = setTimeout(() => {
+      this.playbackFallback = null;
+      if (!this.playbackBusy) {
+        return;
+      }
+      logger.warn('[CascadeVoice] playback idle fallback');
+      this.playbackBusy = false;
+      this.callbacks.onPlaybackIdle?.();
+      this.pumpPendingSpeech();
+    }, estimatedMs);
+    this.playbackFallback.unref?.();
+  }
+
+  private clearPlaybackFallback(): void {
+    if (this.playbackFallback) {
+      clearTimeout(this.playbackFallback);
+      this.playbackFallback = null;
+    }
   }
 }

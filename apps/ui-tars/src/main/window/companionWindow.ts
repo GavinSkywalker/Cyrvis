@@ -13,9 +13,12 @@ import * as env from '@main/env';
 import { windowManager } from '@main/services/windowManager';
 import { showWindow, sendCompanionCommand } from './index';
 import {
+  COMPANION_TASK_EXIT_MS,
   companionBounds,
   hasCompanionConversation,
+  hasCompanionTasks,
   type CompanionSnapshot,
+  type CompanionTask,
 } from '@shared/companion';
 
 let companionWindow: BrowserWindow | null = null;
@@ -33,10 +36,11 @@ let drag: {
   moved: boolean;
 } | null = null;
 let dragTimer: ReturnType<typeof setInterval> | null = null;
+let resizeTimer: ReturnType<typeof setTimeout> | null = null;
 
 function clampPosition(position: { x: number; y: number }) {
   const area = screen.getDisplayNearestPoint(position).workArea;
-  const [width, height] = companionWindow?.getSize() ?? [220, 280];
+  const [width, height] = companionWindow?.getSize() ?? [260, 320];
   return {
     x: Math.round(
       Math.min(
@@ -52,24 +56,59 @@ function clampPosition(position: { x: number; y: number }) {
     ),
   };
 }
-function resizeConversation() {
+function applyCompanionResize() {
   if (!companionWindow || companionWindow.isDestroyed() || drag) return;
   const bounds = companionWindow.getBounds();
   const area = screen.getDisplayMatching(bounds).workArea;
   const next = companionBounds(
     bounds,
-    hasCompanionConversation(snapshot),
+    {
+      conversation: hasCompanionConversation(snapshot),
+      tasks: hasCompanionTasks(snapshot),
+    },
     area,
   );
   if (next.width !== bounds.width || next.height !== bounds.height)
     companionWindow.setBounds(next);
 }
+function resizeCompanion(delayMs = 0) {
+  if (!companionWindow || companionWindow.isDestroyed() || drag) return;
+  const compact =
+    !hasCompanionConversation(snapshot) && !hasCompanionTasks(snapshot);
+  if (compact && resizeTimer) return;
+  if (resizeTimer) {
+    clearTimeout(resizeTimer);
+    resizeTimer = null;
+  }
+  if (compact && delayMs > 0) {
+    resizeTimer = setTimeout(() => {
+      resizeTimer = null;
+      applyCompanionResize();
+    }, delayMs);
+    return;
+  }
+  applyCompanionResize();
+}
+
+export function updateCompanionTasks(tasks: CompanionTask[]): void {
+  const hadTasks = hasCompanionTasks(snapshot);
+  snapshot = { ...snapshot, tasks };
+  resizeCompanion(
+    hadTasks &&
+      !hasCompanionTasks(snapshot) &&
+      !hasCompanionConversation(snapshot)
+      ? COMPANION_TASK_EXIT_MS + 50
+      : 0,
+  );
+  companionWindow?.webContents.send('companion:state', snapshot);
+}
+
 function endDrag() {
   if (dragTimer) clearInterval(dragTimer);
   dragTimer = null;
   const moved = drag?.moved ?? false;
   drag = null;
-  resizeConversation();
+  resizeCompanion();
   if (companionWindow && !companionWindow.isDestroyed()) {
     const [x, y] = companionWindow.getPosition();
     positionStore.set('position', { x, y });
@@ -109,8 +148,21 @@ function registerCompanionIpc() {
     )
       return;
     // Appearance belongs to the main process, independently of voice updates.
-    snapshot = { ...next, skinId: snapshot.skinId };
-    resizeConversation();
+    const hadTasks = hasCompanionTasks(snapshot);
+    // The main process owns the task stack so it remains available even if the
+    // hidden voice renderer is reloading or cannot publish state.
+    snapshot = {
+      ...next,
+      tasks: snapshot.tasks,
+      skinId: snapshot.skinId,
+    };
+    resizeCompanion(
+      hadTasks &&
+        !hasCompanionTasks(snapshot) &&
+        !hasCompanionConversation(snapshot)
+        ? COMPANION_TASK_EXIT_MS + 50
+        : 0,
+    );
     companionWindow?.webContents.send('companion:state', snapshot);
   });
   ipcMain.handle('companion:drag-start', (event) => {
@@ -200,14 +252,14 @@ function createCompanionWindow() {
   const area = screen.getPrimaryDisplay().workArea;
   const position = clampPosition(
     positionStore.get('position') ?? {
-      x: area.x + area.width - 252,
-      y: area.y + area.height - 282,
+      x: area.x + area.width - 292,
+      y: area.y + area.height - 322,
     },
   );
   const window = new BrowserWindow({
     title: 'Cyrvis Companion',
-    width: 220,
-    height: 280,
+    width: 260,
+    height: 320,
     ...position,
     show: false,
     frame: false,
@@ -232,7 +284,7 @@ function createCompanionWindow() {
       hash: '/companion',
     });
   window.once('ready-to-show', () => {
-    resizeConversation();
+    resizeCompanion();
     window.showInactive();
   });
   window.on('close', (event) => {
@@ -242,6 +294,8 @@ function createCompanionWindow() {
     }
   });
   window.on('closed', () => {
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = null;
     endDrag();
     companionWindow = null;
   });

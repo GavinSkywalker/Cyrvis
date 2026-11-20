@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { GazeInspection } from '@main/cyrvis/gaze/inspector';
 import type { ProactiveGazeStatus } from '@main/cyrvis/gaze/proactive';
 import type { GazeObjectStatus } from '@main/cyrvis/gaze/object-tracker';
+import { GAZE_CALIBRATION_NOTICE } from '@shared/gaze';
 import {
   AdaptiveGazeFilter,
   FaceGate,
@@ -60,7 +61,7 @@ const panelStyle = {
   position: 'fixed',
   top: 55,
   right: 18,
-  width: 350,
+  width: 'min(350px, calc(100vw - 36px))',
   zIndex: 9000,
   background: 'white',
   color: '#223',
@@ -90,6 +91,15 @@ export default function CyrvisGaze() {
     dwellMs: 4500,
     progress: 0,
   });
+
+  useEffect(() => {
+    const closeForRuntime = () => {
+      if (window.innerWidth < 900) setOpen(false);
+    };
+    window.addEventListener('cyrvis:runtime-open', closeForRuntime);
+    return () =>
+      window.removeEventListener('cyrvis:runtime-open', closeForRuntime);
+  }, []);
   const [objects, setObjects] = useState<GazeObjectStatus>({
     enabled: true,
     phase: 'searching',
@@ -421,6 +431,7 @@ export default function CyrvisGaze() {
       w.showFaceFeedbackBox(false);
       resetProcessing();
       beginTarget('training', 0);
+      void invoke('announce-calibration').catch(() => {});
     } catch (e) {
       if (id === session.current) {
         stop();
@@ -467,7 +478,10 @@ export default function CyrvisGaze() {
           borderRadius: 10,
           padding: 8,
         }}
-        onClick={() => setOpen(!open)}
+        onClick={() => {
+          if (!open) window.dispatchEvent(new Event('cyrvis:gaze-open'));
+          setOpen(!open);
+        }}
       >
         ◉ 眼动 {stage !== 'off' ? '开启' : ''}
       </button>
@@ -836,6 +850,12 @@ export default function CyrvisGaze() {
                   ? '可以开始体验AI看屏；精度未达标也能进入演示。'
                   : note}
               </p>
+              {(stage === 'loading' || isTarget) && (
+                <p style={{ maxWidth: 760, margin: '12px auto' }}>
+                  <b>注意事项：</b>
+                  {GAZE_CALIBRATION_NOTICE}
+                </p>
+              )}
               {isTarget && (
                 <>
                   <p>

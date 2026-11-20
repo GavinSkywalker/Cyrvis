@@ -131,7 +131,7 @@ describe('Qwen companion voices', () => {
       type: 'message',
       role: 'user',
       content: [
-        { type: 'input_text', text: expect.stringContaining('只朗读') },
+        { type: 'input_text', text: expect.stringContaining('逐字完整朗读') },
       ],
     });
     expect(messages[index + 1].type).toBe('response.create');

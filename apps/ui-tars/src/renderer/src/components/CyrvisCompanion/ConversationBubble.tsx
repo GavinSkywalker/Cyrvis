@@ -16,9 +16,12 @@ export function ConversationBubble({
   }, [
     snapshot.assistantText,
     snapshot.transcript,
+    snapshot.state,
     snapshot.conversationVisible,
   ]);
   if (!hasCompanionConversation(snapshot)) return null;
+  const showTurnStatus =
+    snapshot.state === 'listening' || snapshot.state === 'thinking';
 
   return (
     <section className="companion-conversation" aria-label="Live conversation">
@@ -35,11 +38,12 @@ export function ConversationBubble({
             <p>{snapshot.transcript}</p>
           </div>
         )}
-        {snapshot.assistantText ? (
+        {snapshot.assistantText && (
           <div className="companion-utterance is-assistant" aria-label="CYRVIS">
             <p>{snapshot.assistantText}</p>
           </div>
-        ) : (
+        )}
+        {(showTurnStatus || !snapshot.assistantText) && (
           <div
             className="companion-utterance is-assistant companion-typing"
             role="status"

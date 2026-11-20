@@ -60,9 +60,17 @@ describe('companion skins', () => {
       readFileSync(resolve(root, 'skins/SHA256SUMS.json'), 'utf8'),
     );
     for (const [file, hash] of Object.entries(hashes)) {
+      const content = readFileSync(resolve(root, 'skins', file));
       expect(
         createHash('sha256')
-          .update(readFileSync(resolve(root, 'skins', file)))
+          .update(
+            file.endsWith('.svg')
+              ? Buffer.from(
+                  content.toString('utf8').replace(/\r\n/g, '\n'),
+                  'utf8',
+                )
+              : content,
+          )
           .digest('hex'),
         file,
       ).toBe(hash);

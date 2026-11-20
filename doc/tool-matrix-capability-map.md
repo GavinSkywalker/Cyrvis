@@ -6,13 +6,17 @@
 >
 > 适用范围：`apps/ui-tars/src/main/cyrvis/tools/`
 
+> 2026-11-21 更新：明确用户指令即授权。工具、深层能力和工作流不再进入
+> 二次确认状态；旧版 `waiting_confirmation` 数据在加载时直接迁移或恢复执行。
+
 ## 1. 当前规模
 
-默认运行态注册 `81` 个工具：
+基础工具矩阵注册 `89` 个工具；启用统一 OrchestrationRuntime 后为 `113` 个：
 
-- `72` 个基础工具和内置 Provider 工具；
+- `79` 个基础工具、内置 Provider 和工作流工具；
 - `9` 个在 `SystemStateStore` 可用时注册的动态系统工具；
-- 外部 Provider manifest 还可以继续注册工具，因此 `81` 是默认基线，不是理论上限；
+- `18` 个由 OrchestrationRuntime 注册的统一控制面工具；
+- 外部 Provider manifest 还可以继续注册工具，因此 `113` 是默认完整基线，不是理论上限；
 - 语言模型默认最多同时看到 `24` 个工具，完整目录通过 `capability.*` 元工具访问。
 
 工具矩阵不是“给每个已安装软件生成一个专用函数”。当前模型是：
@@ -31,17 +35,17 @@
 
 ### 2.1 能力元工具，4 个
 
-| 工具                   | 功能                                           |
-| ---------------------- | ---------------------------------------------- |
-| `capability.search`    | 搜索完整能力目录，包括默认工具面中隐藏的工具   |
-| `capability.describe`  | 读取指定工具的完整参数、风险和可用条件         |
-| `capability.invoke`    | 调用隐藏工具，但仍经过统一参数、权限和确认策略 |
-| `capability.providers` | 查看 Provider、可用性、权限和工具归属          |
+| 工具                   | 功能                                         |
+| ---------------------- | -------------------------------------------- |
+| `capability.search`    | 搜索完整能力目录，包括默认工具面中隐藏的工具 |
+| `capability.describe`  | 读取指定工具的完整参数、风险和可用条件       |
+| `capability.invoke`    | 调用隐藏工具，并经过统一参数、路径和风险检查 |
+| `capability.providers` | 查看 Provider、可用性、权限和工具归属        |
 
 这些工具属于 Tier 0，始终可见。设计原因是完整工具目录可能很大，但 `search / describe / invoke`
 足以组成稳定的按需发现协议。
 
-### 2.2 上下文与系统感知，11 个
+### 2.2 上下文与系统感知，12 个
 
 | 工具                      | 功能                                                          |
 | ------------------------- | ------------------------------------------------------------- |
@@ -56,6 +60,7 @@
 | `steam.launch_game`       | 按名称、部分名称或 AppID 启动 Steam 游戏                      |
 | `context.snapshot`        | 读取当前用户、前台资源、最近动作、任务和绑定                  |
 | `context.resources`       | 搜索应用、窗口、文件、网站等动态资源                          |
+| `context.intent`          | 融合系统、焦点、语音、历史和眼动得到活动与候选意图            |
 
 这组工具解决“电脑现在有什么、用户正在做什么”，不把完整系统状态无条件写死进提示词。
 进程和窗口默认按 10 秒刷新，应用、Steam、磁盘、电池和服务按 10 分钟全量刷新；前台窗口优先
@@ -89,7 +94,7 @@
 | `archive.extract`       | 解压 ZIP                           |
 
 这些操作通常有明确的输入和可验证输出，适合绕过截图和 GUI 循环。读取、写入、覆盖、移动和删除
-分别经过路径策略；敏感路径、覆盖和删除需要确认。
+分别经过路径解析；敏感路径、覆盖和删除按明确请求直接执行。
 
 ### 2.4 应用与窗口，10 个
 
@@ -158,7 +163,7 @@ Provider 专用能力
 | `process.start`   | 启动分离的后台程序并返回 PID                       |
 | `process.stop`    | 按 PID 结束进程                                    |
 
-`run / start / stop` 是 Tier 4 高风险工具，始终需要确认。`run` 不接受任意 shell 字符串，
+`run / start / stop` 是 Tier 4 高风险工具，用户在明确请求时直接执行。`run` 不接受任意 shell 字符串，
 避免命令拼接和隐式 shell 注入。
 
 ### 2.8 网络、网页与浏览器，9 个
@@ -200,7 +205,7 @@ Provider 专用能力
 | `timer.cancel`        | 取消提醒                                   |
 | `timer.list`          | 列出活动提醒                               |
 
-`system.power` 属于 Tier 4，始终确认。计时器当前只存在当前 Electron 进程内，重启后不会恢复。
+`system.power` 属于 Tier 4，按明确请求直接执行。计时器当前只存在当前 Electron 进程内，重启后不会恢复。
 
 ### 2.11 Office，1 个
 
@@ -217,6 +222,25 @@ Provider 专用能力
 | -------------------- | ------------------------- |
 | `vscode.open_file`   | 使用 VS Code 打开文件     |
 | `vscode.open_folder` | 使用 VS Code 打开项目目录 |
+
+### 2.13 本地工作流，6 个
+
+| 工具              | 功能                       |
+| ----------------- | -------------------------- |
+| `workflow.start`  | 启动依赖 DAG 工作流        |
+| `workflow.status` | 查询工作流状态和当前步骤   |
+| `workflow.list`   | 列出活动或历史工作流       |
+| `workflow.cancel` | 取消工作流                 |
+| `workflow.resume` | 恢复暂停或应用重启后的任务 |
+
+### 2.14 统一控制面，25 个
+
+| 类别       | 工具                                                                              |
+| ---------- | --------------------------------------------------------------------------------- |
+| 任务       | `task.submit/plan/list/status/pause/resume/cancel/retry`                          |
+| 自主意图   | `autonomy.status/configure/accept/reject/goal.add/goal.remove`                    |
+| 运行时能力 | `capability.synthesize/proposals/propose-provider/propose-binding/approve/reject` |
+| 世界与轨迹 | `world.snapshot/context`、`trace.list/replay`                                     |
 
 VS Code 和浏览器 DevTools 是 Provider 模型的试点。Provider 可以由 manifest 声明 application、
 process、service、environment、executable、权限和前台激活条件，并支持 builtin、stdio、
@@ -241,9 +265,9 @@ Provider 健康和失败次数。
 
 - 所有工具调用统一经过 `ToolRegistry`；
 - 参数先经过 schema、默认值和路径绝对化；
-- 路径参数经过 `PathPolicy`，敏感目录和工作区外路径需要确认；
-- 高风险、覆盖、删除、关闭应用和电源操作需要用户确认；
-- 模型不能通过 `capability.invoke` 绕过确认；
+- 路径参数经过 `PathPolicy`，敏感目录和工作区外路径可直接访问；
+- 高风险、覆盖、删除、关闭应用和电源操作按明确指令直接执行；
+- `capability.invoke` 与直接工具调用共享同一参数和路径策略；
 - 本地语音、MCP 和 Provider 共用同一 Registry；
 - 工具调用成功、失败、耗时和错误写入审计；
 - CYRVIS 自身窗口和进程不能通过通用窗口/应用关闭工具操作。

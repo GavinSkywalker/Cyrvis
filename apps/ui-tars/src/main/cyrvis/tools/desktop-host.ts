@@ -104,13 +104,18 @@ const resolveApplicationCommand = async (
 export const isSupportedApplicationAlias = (value: string): boolean =>
   Boolean(APPLICATION_ALIASES[normalizeAlias(value)]);
 
-const runPowerShell = (script: string, env: NodeJS.ProcessEnv = {}) =>
+const runPowerShell = (
+  script: string,
+  env: NodeJS.ProcessEnv = {},
+  timeoutMs = 20_000,
+) =>
   new Promise<string>((resolve, reject) => {
     const utf8Script = `
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [Console]::OutputEncoding
 ${script}
 `;
+    const encodedScript = Buffer.from(utf8Script, 'utf16le').toString('base64');
     execFile(
       'powershell.exe',
       [
@@ -119,12 +124,12 @@ ${script}
         '-NonInteractive',
         '-ExecutionPolicy',
         'Bypass',
-        '-Command',
-        utf8Script,
+        '-EncodedCommand',
+        encodedScript,
       ],
       {
         env: { ...process.env, ...env },
-        timeout: 20_000,
+        timeout: timeoutMs,
         windowsHide: true,
         maxBuffer: 4 * 1024 * 1024,
       },
@@ -270,6 +275,101 @@ $payload = [pscustomobject]@{
   pid = [int]$target.Id
   process = $target.ProcessName
   title = $target.MainWindowTitle
+} | ConvertTo-Json -Compress
+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
+`;
+
+const CLOSE_BROWSER_TAB_SCRIPT = `
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class CyrvisBrowserTab {
+  [DllImport("user32.dll")]
+  public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")]
+  public static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
+}
+"@
+$query = [Text.Encoding]::UTF8.GetString(
+  [Convert]::FromBase64String($env:CYRV_BROWSER_TAB_QUERY_B64)
+)
+$browserNames = @(
+  "chrome",
+  "msedge",
+  "brave",
+  "vivaldi",
+  "opera",
+  "QQBrowser"
+)
+$found = @()
+$tabType = New-Object System.Windows.Automation.PropertyCondition(
+  [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+  [System.Windows.Automation.ControlType]::TabItem
+)
+foreach ($process in @(Get-Process | Where-Object {
+  $browserNames -contains $_.ProcessName -and $_.MainWindowHandle -ne 0
+})) {
+  try {
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle(
+      [IntPtr]$process.MainWindowHandle
+    )
+    if (-not $root) { continue }
+    $tabs = $root.FindAll(
+      [System.Windows.Automation.TreeScope]::Descendants,
+      $tabType
+    )
+    foreach ($tab in $tabs) {
+      $name = [string]$tab.Current.Name
+      if (
+        $name -and
+        $name.IndexOf($query, [StringComparison]::OrdinalIgnoreCase) -ge 0
+      ) {
+        $found += [pscustomobject]@{
+          Element = $tab
+          Process = $process
+          Title = $name
+        }
+      }
+    }
+  } catch {
+    continue
+  }
+}
+if ($found.Count -eq 0) {
+  throw "No matching browser tab"
+}
+$exact = @($found | Where-Object {
+  $_.Title.Equals($query, [StringComparison]::OrdinalIgnoreCase)
+})
+if ($exact.Count -eq 1) {
+  $target = $exact[0]
+} elseif ($found.Count -eq 1) {
+  $target = $found[0]
+} else {
+  throw "Browser tab target is ambiguous"
+}
+[void][CyrvisBrowserTab]::SetForegroundWindow(
+  [IntPtr]$target.Process.MainWindowHandle
+)
+try {
+  $selection = $target.Element.GetCurrentPattern(
+    [System.Windows.Automation.SelectionItemPattern]::Pattern
+  )
+  $selection.Select()
+} catch {
+  $target.Element.SetFocus()
+}
+Start-Sleep -Milliseconds 180
+[CyrvisBrowserTab]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero)
+[CyrvisBrowserTab]::keybd_event(0x57, 0, 0, [UIntPtr]::Zero)
+[CyrvisBrowserTab]::keybd_event(0x57, 0, 2, [UIntPtr]::Zero)
+[CyrvisBrowserTab]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero)
+Start-Sleep -Milliseconds 250
+$payload = [pscustomobject]@{
+  process = $target.Process.ProcessName
+  title = $target.Title
 } | ConvertTo-Json -Compress
 [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
 `;
@@ -476,6 +576,36 @@ $targets | Stop-Process -Force`,
     return name.trim();
   }
 
+  async closeBrowserPage(
+    query: string,
+  ): Promise<{ title: string; process: string }> {
+    if (process.platform !== 'win32') {
+      return unsupported('Closing browser tabs');
+    }
+    const output = await runPowerShell(
+      CLOSE_BROWSER_TAB_SCRIPT,
+      {
+        CYRV_BROWSER_TAB_QUERY_B64: Buffer.from(query, 'utf8').toString(
+          'base64',
+        ),
+      },
+      12_000,
+    );
+    const payload = output.trim();
+    if (!payload) {
+      throw new Error('Browser tab closed without a verification payload.');
+    }
+    const decoded = Buffer.from(payload, 'base64').toString('utf8');
+    const parsed = parseJson<{ title: string; process: string } | null>(
+      decoded,
+      null,
+    );
+    if (!parsed?.title) {
+      throw new Error('Browser tab close verification failed.');
+    }
+    return parsed;
+  }
+
   async listProcesses(): Promise<ProcessInfo[]> {
     if (process.platform !== 'win32') {
       return this.listUnixProcesses();
@@ -587,7 +717,7 @@ try {
       $slide.Shapes.Placeholders.Item(2).TextFrame.TextRange.Text = $env:CYRV_PPT_SUBTITLE
     } catch {}
   }
-  $presentation.SaveAs($env:CYRV_PPT_PATH)
+  $presentation.SaveAs($env:CYRV_PPT_PATH, 24)
 } finally {
   if ($presentation) {
     try { $presentation.Close() } catch {}

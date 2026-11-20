@@ -15,6 +15,14 @@ export type ToolDomain =
 
 export type ToolRisk = 'low' | 'medium' | 'high';
 export type ToolExposureTier = 0 | 1 | 2 | 3 | 4;
+export type ToolSideEffect =
+  | 'none'
+  | 'read'
+  | 'write'
+  | 'external'
+  | 'irreversible';
+export type ToolCostClass = 'free' | 'low' | 'medium' | 'high';
+export type ToolLatencyClass = 'instant' | 'fast' | 'normal' | 'slow';
 export type CapabilityAvailability =
   | 'available'
   | 'degraded'
@@ -59,6 +67,26 @@ export interface ToolCapabilityMetadata {
   schemaVersion?: number;
   permissions?: ToolPermission[];
   requirements?: CapabilityRequirements;
+  fallbackToolIds?: string[];
+  costClass?: ToolCostClass;
+  latencyClass?: ToolLatencyClass;
+}
+
+export interface ToolExecutionContract {
+  sideEffect?: ToolSideEffect;
+  idempotent?: boolean;
+  retryable?: boolean;
+  maxAttempts?: number;
+  retryBackoffMs?: number;
+  timeoutMs?: number;
+  resumePolicy?: 'manual' | 'restart' | 'verify_then_resume';
+  verification?: 'none' | 'preferred' | 'required';
+}
+
+export interface ToolVerificationResult {
+  ok: boolean;
+  message: string;
+  data?: unknown;
 }
 
 export interface JsonSchema {
@@ -87,6 +115,7 @@ export interface DesktopHost {
   clipboardWrite(text: string): Promise<void>;
   launchApplication(name: string, target?: string): Promise<string>;
   closeApplication(name: string): Promise<string>;
+  closeBrowserPage?(query: string): Promise<{ title: string; process: string }>;
   listProcesses(): Promise<ProcessInfo[]>;
   listWindows(): Promise<WindowInfo[]>;
   getForegroundWindow?(): Promise<WindowInfo | null>;
@@ -154,6 +183,12 @@ export interface ToolContext {
   desktop: DesktopHost;
   resolvePath(input: string): string;
   getRecentResources?(): ToolResourceHint[];
+  reportProgress?(message: string, percent?: number): void;
+}
+
+export interface ToolExecutionOptions {
+  confirmed?: boolean;
+  onProgress?: (message: string, percent?: number) => void;
 }
 
 export interface ToolDefinition<
@@ -164,6 +199,7 @@ export interface ToolDefinition<
   description: string;
   risk: ToolRisk;
   capability?: ToolCapabilityMetadata;
+  contract?: ToolExecutionContract;
   inputSchema: JsonSchema;
   prepare(
     input: Record<string, unknown>,
@@ -174,6 +210,11 @@ export interface ToolDefinition<
     args: Args,
     context: ToolContext,
   ): string | null | Promise<string | null>;
+  verify?(
+    args: Args,
+    result: ToolResult,
+    context: ToolContext,
+  ): ToolVerificationResult | Promise<ToolVerificationResult>;
   execute(args: Args, context: ToolContext): Promise<ToolResult>;
 }
 
@@ -186,6 +227,14 @@ export interface PreparedToolCall {
   confirmationReason: string | null;
 }
 
+export interface PendingConfirmationSnapshot {
+  tool: string;
+  risk: ToolRisk;
+  domain: ToolDomain;
+  confirmationReason: string | null;
+  expiresAt: number;
+}
+
 export interface FastToolRoute {
   kind: 'execute' | 'confirm' | 'cancel';
   tool: string;
@@ -195,14 +244,6 @@ export interface FastToolRoute {
   confirmationReason: string | null;
   risk: ToolRisk;
   domain: ToolDomain;
-}
-
-export interface PendingConfirmationSnapshot {
-  tool: string;
-  risk: ToolRisk;
-  domain: ToolDomain;
-  confirmationReason: string | null;
-  expiresAt: number;
 }
 
 export interface FastToolOutcome {
@@ -235,12 +276,19 @@ export interface CapabilityDescriptor {
   schemaVersion: number;
   permissions: ToolPermission[];
   requirements: CapabilityRequirements;
+  contract: Required<ToolExecutionContract>;
+  fallbackToolIds: string[];
+  costClass: ToolCostClass;
+  latencyClass: ToolLatencyClass;
   availability: CapabilityAvailability;
   unavailableReason: string | null;
   usage: {
     successes: number;
     failures: number;
+    consecutiveFailures: number;
     lastUsedAt: number | null;
+    averageDurationMs: number | null;
+    timeouts: number;
   };
   inputSchema: JsonSchema;
 }

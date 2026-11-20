@@ -313,6 +313,22 @@ describe('DynamicContextStore', () => {
           }),
         ]),
       });
+      matrix.dynamicContext.recordUserText('这个函数怎么修改');
+      const intent = await matrix.registry.execute('context.intent', {});
+      expect(intent).toMatchObject({
+        ok: true,
+        data: {
+          activity: 'coding',
+          recentUtterance: {
+            text: '这个函数怎么修改',
+          },
+          candidateIntents: [
+            expect.objectContaining({
+              kind: 'edit',
+            }),
+          ],
+        },
+      });
     } finally {
       dispose();
     }

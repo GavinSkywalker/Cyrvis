@@ -126,6 +126,54 @@ describe('cascade conversation routing', () => {
     });
   });
 
+  it('acknowledges a background tool immediately without waiting for another model round', async () => {
+    openAiMock.create.mockReset();
+    openAiMock.create.mockImplementation(async () =>
+      (async function* () {
+        yield {
+          choices: [
+            {
+              delta: {
+                content: '',
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: 'call-long',
+                    type: 'function',
+                    function: {
+                      name: 'create_presentation',
+                      arguments: '{"title":"测试"}',
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        };
+      })(),
+    );
+    const conversation = new CascadeConversationClient([]);
+    const result = await conversation.ask('制作测试 PPT', {
+      signal: new AbortController().signal,
+      callbacks: {
+        onToolCall: (call) => {
+          conversation.sendToolResult(
+            call.callId,
+            JSON.stringify({
+              ok: true,
+              status: 'running',
+              background: true,
+              startMessage: '好，PPT 制作已开始，完成后我会向你汇报。',
+            }),
+          );
+        },
+      },
+    });
+
+    expect(result.text).toBe('好，PPT 制作已开始，完成后我会向你汇报。');
+    expect(openAiMock.create).toHaveBeenCalledTimes(1);
+  });
+
   it('uses the latest dynamic tool definitions on each turn', async () => {
     openAiMock.create.mockReset();
     openAiMock.create.mockImplementation(async () =>

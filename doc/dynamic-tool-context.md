@@ -193,12 +193,13 @@ ToolRegistry 的统一确认策略，绑定接口不能绕过确认。
 
 ## 7. 上下文工具与界面
 
-新增两个稳定工具：
+新增三个稳定工具：
 
 | 工具                | 作用                                             |
 | ------------------- | ------------------------------------------------ |
 | `context.snapshot`  | 读取用户状态、活动资源、最近动作、绑定和兜底资源 |
 | `context.resources` | 搜索应用、窗口、文件、网站等动态资源及其绑定能力 |
+| `context.intent`    | 融合系统、语音历史、任务和眼动得到活动与候选意图 |
 
 这两个工具按上下文激活，不会无条件占用模型工具预算。
 
@@ -252,23 +253,23 @@ Windows 使用 `scripts/cyrvis/foreground-events.ps1` 注册
 
 ## 11. 运行文件
 
-| 文件                                   | 职责                                    |
-| -------------------------------------- | --------------------------------------- |
-| `context/dynamic-context.ts`           | 统一上下文、事件、资源、绑定和刷新      |
-| `context/user-context.ts`              | 用户临时状态、TTL、隐私过滤             |
-| `context/foreground-monitor.ts`        | 前台窗口轻量轮询和变化检测              |
-| `context/windows-foreground-events.ts` | Windows 原生前台事件桥                  |
-| `context/builtin-providers.ts`         | VS Code 和浏览器 Provider 试点          |
-| `context/context-budget.ts`            | 模型上下文长度预算                      |
-| `context/resource-catalog.ts`          | 应用、窗口、文件、网站资源目录          |
-| `context/binding-resolver.ts`          | 资源到工具/Provider 的绑定              |
-| `context/relevance-engine.ts`          | 上下文相关性评分和 UI 兜底能力          |
-| `context/tools.ts`                     | `context.snapshot`、`context.resources` |
-| `system/system-state.ts`               | 系统快照、刷新和前台窗口合并            |
-| `system/reminders.ts`                  | 通知和本地一次性计时器                  |
-| `tools/document-tools.ts`              | 文档文本提取、PDF 提取和 ZIP 操作       |
-| `tools/tool-surface.ts`                | 动态工具预算、激活和排序                |
-| `tools/provider-manager.ts`            | Provider 生命周期和前台延迟激活         |
+| 文件                                   | 职责                                                      |
+| -------------------------------------- | --------------------------------------------------------- |
+| `context/dynamic-context.ts`           | 统一上下文、事件、资源、绑定和刷新                        |
+| `context/user-context.ts`              | 用户临时状态、TTL、隐私过滤                               |
+| `context/foreground-monitor.ts`        | 前台窗口轻量轮询和变化检测                                |
+| `context/windows-foreground-events.ts` | Windows 原生前台事件桥                                    |
+| `context/builtin-providers.ts`         | VS Code 和浏览器 Provider 试点                            |
+| `context/context-budget.ts`            | 模型上下文长度预算                                        |
+| `context/resource-catalog.ts`          | 应用、窗口、文件、网站资源目录                            |
+| `context/binding-resolver.ts`          | 资源到工具/Provider 的绑定                                |
+| `context/relevance-engine.ts`          | 上下文相关性评分和 UI 兜底能力                            |
+| `context/tools.ts`                     | `context.snapshot`、`context.resources`、`context.intent` |
+| `system/system-state.ts`               | 系统快照、刷新和前台窗口合并                              |
+| `system/reminders.ts`                  | 通知和本地一次性计时器                                    |
+| `tools/document-tools.ts`              | 文档文本提取、PDF 提取和 ZIP 操作                         |
+| `tools/tool-surface.ts`                | 动态工具预算、激活和排序                                  |
+| `tools/provider-manager.ts`            | Provider 生命周期和前台延迟激活                           |
 
 ## 12. 性能基准
 
@@ -279,7 +280,7 @@ cd apps/ui-tars
 npx tsx scripts/cyrvis/benchmark-dynamic-context.ts
 ```
 
-本机 381 个资源、2206 个绑定、81 个注册工具：
+本机 381 个资源、2206 个绑定、89 个基础注册工具：
 
 ```text
 visible tools: 24

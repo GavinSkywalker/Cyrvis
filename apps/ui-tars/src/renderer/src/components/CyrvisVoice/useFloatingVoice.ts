@@ -52,6 +52,7 @@ export function useFloatingVoice() {
   const [error, setError] = useState<string | null>(null);
 
   const lastEntryRef = useRef<{ key: string; at: number } | null>(null);
+  const assistantTextStartedRef = useRef(false);
 
   const appendEntry = useCallback(
     (
@@ -167,6 +168,9 @@ export function useFloatingVoice() {
         setTranscriptFinal(final);
         if (final) {
           setThinking(false);
+          if (text.trim() && !assistantTextStartedRef.current) {
+            setAssistantText('');
+          }
           if (text.trim()) {
             appendEntry('user', text);
           }
@@ -174,7 +178,13 @@ export function useFloatingVoice() {
       }),
       window.electron.voice.onAssistantText(({ text, final }) => {
         setThinking(false);
-        setAssistantText((current) => (final ? text : current + text));
+        setAssistantText((current) => {
+          if (!assistantTextStartedRef.current) {
+            assistantTextStartedRef.current = true;
+            return text;
+          }
+          return final ? text : current + text;
+        });
         setAssistantFinal(final);
         if (final) {
           appendEntry('assistant', text);
@@ -183,7 +193,7 @@ export function useFloatingVoice() {
       window.electron.voice.onSpeechStarted(() => {
         setTranscript('');
         setTranscriptFinal(false);
-        setAssistantText('');
+        assistantTextStartedRef.current = false;
         setAssistantFinal(false);
         setThinking(false);
         setError(null);
@@ -198,6 +208,7 @@ export function useFloatingVoice() {
         setThinking(true);
       }),
       window.electron.voice.onResponseStarted(() => {
+        assistantTextStartedRef.current = false;
         setThinking(false);
         setPlaybackActive(true);
       }),
@@ -212,6 +223,7 @@ export function useFloatingVoice() {
         setTranscript('');
         setTranscriptFinal(false);
         setAssistantText('');
+        assistantTextStartedRef.current = false;
         setAssistantFinal(false);
         setError(null);
       }),

@@ -146,4 +146,28 @@ describe('desktop window tools', () => {
       ],
     });
   });
+
+  it('closes a named browser page through the native tab fallback', async () => {
+    const closeBrowserPage = vi.fn(async () => ({
+      title: 'Project Docs',
+      process: 'msedge',
+    }));
+    const context = createContext(async () => '');
+    context.desktop = {
+      ...context.desktop,
+      closeBrowserPage,
+    } as DesktopHost;
+
+    const result = await tool('browser.close_page').execute(
+      { query: 'Project Docs' },
+      context,
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: { title: 'Project Docs', process: 'msedge' },
+    });
+    expect(closeBrowserPage).toHaveBeenCalledWith('Project Docs');
+    expect(tool('browser.close_page').requiresConfirmation).toBeUndefined();
+  });
 });

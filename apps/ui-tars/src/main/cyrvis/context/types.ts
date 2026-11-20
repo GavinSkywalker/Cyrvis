@@ -17,7 +17,9 @@ export type ResourceKind =
   | 'file'
   | 'website'
   | 'account'
-  | 'device';
+  | 'device'
+  | 'control'
+  | 'clipboard';
 export type ResourceHealth =
   | 'available'
   | 'degraded'
@@ -69,6 +71,7 @@ export interface UserContextSnapshot {
   activeWindow: StateFact<WindowContext> | null;
   focusedControl: StateFact<FocusedControlContext> | null;
   selectedText: StateFact<string> | null;
+  clipboard: StateFact<string> | null;
   recentRequest: StateFact<string> | null;
   recentActions: RecentActionContext[];
   recentResourceIds: string[];
@@ -171,10 +174,12 @@ export interface DynamicContextOptions {
   windowTtlMs?: number;
   focusTtlMs?: number;
   selectedTextTtlMs?: number;
+  clipboardTtlMs?: number;
   requestTtlMs?: number;
   actionTtlMs?: number;
   maxRecentActions?: number;
   maxRecentResources?: number;
   perceptionMinIntervalMs?: number;
   perceptionMaxBackoffMs?: number;
+  timelineStateFile?: string;
 }

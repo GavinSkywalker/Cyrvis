@@ -13,6 +13,7 @@ import type {
 const DEFAULT_WINDOW_TTL_MS = 15_000;
 const DEFAULT_FOCUS_TTL_MS = 5_000;
 const DEFAULT_SELECTED_TEXT_TTL_MS = 30_000;
+const DEFAULT_CLIPBOARD_TTL_MS = 60_000;
 const DEFAULT_REQUEST_TTL_MS = 10 * 60_000;
 const DEFAULT_ACTION_TTL_MS = 10 * 60_000;
 
@@ -39,6 +40,7 @@ export class UserContextStore {
   private readonly windowTtlMs: number;
   private readonly focusTtlMs: number;
   private readonly selectedTextTtlMs: number;
+  private readonly clipboardTtlMs: number;
   private readonly requestTtlMs: number;
   private readonly actionTtlMs: number;
   private readonly maxRecentActions: number;
@@ -52,6 +54,7 @@ export class UserContextStore {
   private activeWindow: StateFact<WindowContext> | null = null;
   private focusedControl: StateFact<FocusedControlContext> | null = null;
   private selectedText: StateFact<string> | null = null;
+  private clipboard: StateFact<string> | null = null;
   private recentRequest: StateFact<string> | null = null;
   private recentActions: RecentActionContext[] = [];
   private recentResourceIds: string[] = [];
@@ -63,6 +66,7 @@ export class UserContextStore {
     this.focusTtlMs = options.focusTtlMs ?? DEFAULT_FOCUS_TTL_MS;
     this.selectedTextTtlMs =
       options.selectedTextTtlMs ?? DEFAULT_SELECTED_TEXT_TTL_MS;
+    this.clipboardTtlMs = options.clipboardTtlMs ?? DEFAULT_CLIPBOARD_TTL_MS;
     this.requestTtlMs = options.requestTtlMs ?? DEFAULT_REQUEST_TTL_MS;
     this.actionTtlMs = options.actionTtlMs ?? DEFAULT_ACTION_TTL_MS;
     this.maxRecentActions = options.maxRecentActions ?? 20;
@@ -106,10 +110,22 @@ export class UserContextStore {
   }
 
   setFocusedControl(control: FocusedControlContext | null): void {
+    if (this.syncFocusedControl(control)) this.touch();
+  }
+
+  syncFocusedControl(control: FocusedControlContext | null): boolean {
     if (!control?.name.trim()) {
+      if (this.focusedControl === null) return false;
       this.focusedControl = null;
-      this.touch();
-      return;
+      return true;
+    }
+    if (
+      this.focusedControl?.value.name === control.name.trim().slice(0, 200) &&
+      this.focusedControl?.value.role === control.role?.slice(0, 120) &&
+      this.focusedControl?.value.automationId ===
+        control.automationId?.slice(0, 200)
+    ) {
+      return false;
     }
     this.focusedControl = this.fact(
       {
@@ -122,15 +138,33 @@ export class UserContextStore {
       this.focusTtlMs,
       'private',
     );
-    this.touch();
+    return true;
   }
 
   setSelectedText(text: string | null): void {
+    if (this.syncSelectedText(text)) this.touch();
+  }
+
+  syncSelectedText(text: string | null): boolean {
     const normalized = text ? normalizeText(text, 1_000) : '';
+    if ((this.selectedText?.value || '') === normalized) return false;
     this.selectedText = normalized
       ? this.fact(normalized, 'user', 0.9, this.selectedTextTtlMs, 'private')
       : null;
-    this.touch();
+    return true;
+  }
+
+  setClipboard(text: string | null): void {
+    if (this.syncClipboard(text)) this.touch();
+  }
+
+  syncClipboard(text: string | null): boolean {
+    const normalized = text ? normalizeText(text, 2_000) : '';
+    if ((this.clipboard?.value || '') === normalized) return false;
+    this.clipboard = normalized
+      ? this.fact(normalized, 'perception', 0.9, this.clipboardTtlMs, 'private')
+      : null;
+    return true;
   }
 
   recordUserText(text: string): void {
@@ -211,6 +245,7 @@ export class UserContextStore {
   clear(): void {
     this.focusedControl = null;
     this.selectedText = null;
+    this.clipboard = null;
     this.recentRequest = null;
     this.recentActions = [];
     this.recentResourceIds = [];
@@ -227,6 +262,7 @@ export class UserContextStore {
     if (isExpired(this.activeWindow, now)) this.activeWindow = null;
     if (isExpired(this.focusedControl, now)) this.focusedControl = null;
     if (isExpired(this.selectedText, now)) this.selectedText = null;
+    if (isExpired(this.clipboard, now)) this.clipboard = null;
     if (isExpired(this.recentRequest, now)) this.recentRequest = null;
     if (isExpired(this.activeApplication, now)) this.activeApplication = null;
     this.recentActions = this.recentActions.filter(
@@ -240,6 +276,7 @@ export class UserContextStore {
       activeWindow: this.activeWindow,
       focusedControl: this.focusedControl,
       selectedText: this.selectedText,
+      clipboard: this.clipboard,
       recentRequest: this.recentRequest,
       recentActions: [...this.recentActions],
       recentResourceIds: [...this.recentResourceIds],

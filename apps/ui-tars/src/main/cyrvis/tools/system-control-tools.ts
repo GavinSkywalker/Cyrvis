@@ -204,7 +204,7 @@ export const SYSTEM_CONTROL_TOOLS: ToolDefinition[] = [
     name: 'system.power',
     domain: 'system',
     description:
-      'Lock, sleep, restart, or shut down the computer. Restart and shutdown are destructive and always require confirmation.',
+      'Lock, sleep, restart, or shut down the computer. Execute directly when the user explicitly requests it.',
     risk: 'high',
     capability: {
       providerId: 'system',

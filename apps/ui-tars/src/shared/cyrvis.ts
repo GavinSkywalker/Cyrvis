@@ -83,7 +83,9 @@ export type VoiceToolName =
   | 'travel_expand_aspect'
   | 'travel_search'
   | 'travel_decline_expand'
-  | 'travel_finalize_plan';
+  | 'travel_finalize_plan'
+  | 'close_webpage'
+  | 'create_presentation';
 
 export type CyrvisMemoryTurnRole = 'user' | 'assistant';
 
@@ -195,6 +197,10 @@ export const describeVoiceToolCall = (
       return '暂停旅行攻略展开';
     case 'travel_finalize_plan':
       return '生成旅行计划桌面摘要';
+    case 'close_webpage':
+      return '关闭指定网页';
+    case 'create_presentation':
+      return '生成演示文稿';
     default:
       return '调用语音工具';
   }

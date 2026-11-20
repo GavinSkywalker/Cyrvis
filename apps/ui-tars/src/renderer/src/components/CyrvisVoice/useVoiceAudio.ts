@@ -203,6 +203,7 @@ export function useVoiceAudio() {
   const keywordPcmRef = useRef(new Uint8Array());
   const bargePrerollRef = useRef<Float32Array[]>([]);
   const assistantSpeakingRef = useRef(false);
+  const assistantTextStartedRef = useRef(false);
   const assistantPlaybackStartedAtRef = useRef(0);
   const speechDeltaRef = useRef('');
   const speechDeltaSeenRef = useRef(false);
@@ -847,8 +848,8 @@ export function useVoiceAudio() {
       }),
       window.electron.voice.onSpeechStarted(() => {
         setTranscript('');
-        setAssistantText('');
         if (!assistantSpeakingRef.current) {
+          assistantTextStartedRef.current = false;
           setThinking(false);
         }
       }),
@@ -877,7 +878,7 @@ export function useVoiceAudio() {
         legacyPlayerRef.current.play(pcm16);
       }),
       window.electron.voice.onResponseStarted(() => {
-        setAssistantText('');
+        assistantTextStartedRef.current = false;
         console.info('[cyrvis] response started', {
           engine: settingsRef.current.voiceEngine,
           ttsProvider: settingsRef.current.voiceTtsProvider,
@@ -957,6 +958,9 @@ export function useVoiceAudio() {
         transcriptRef.current = text;
         setTranscript(text);
         if (final) {
+          if (text.trim() && !assistantTextStartedRef.current) {
+            setAssistantText('');
+          }
           if (!text.trim()) {
             setThinking(false);
           }
@@ -964,7 +968,13 @@ export function useVoiceAudio() {
       }),
       window.electron.voice.onAssistantText(({ text, final }) => {
         setThinking(false);
-        setAssistantText((current) => (final ? text : current + text));
+        setAssistantText((current) => {
+          if (!assistantTextStartedRef.current) {
+            assistantTextStartedRef.current = true;
+            return text;
+          }
+          return final ? text : current + text;
+        });
       }),
       window.electron.voice.onSpeechText(({ text, final }) => {
         if (settingsRef.current.voiceEngine === 'omni') {
@@ -990,6 +1000,7 @@ export function useVoiceAudio() {
       window.electron.voice.onWake(() => {
         setTranscript('');
         setAssistantText('');
+        assistantTextStartedRef.current = false;
       }),
       window.electron.voice.onSleep(() => setThinking(false)),
       window.electron.voice.onAudioMode(({ mode }) => {

@@ -72,7 +72,6 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
   private proactiveItemPending = false;
   private proactiveDeleteRequested = false;
   private lastUserItemId: string | null = null;
-  private pendingSpeakExact = false;
   private cancelRequested = false;
   private localSpeechActive = false;
   private localSpeechMs = 0;
@@ -81,7 +80,7 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
   private awaitingResponse = false;
   private activeResponseId: string | null = null;
   private pendingToolResults: Array<{ callId: string; output: string }> = [];
-  private pendingSpeak: string | null = null;
+  private pendingSpeak: Array<{ text: string; exact: boolean }> = [];
   private pendingUserText: string | null = null;
   private toolResultFallback: ReturnType<typeof setTimeout> | null = null;
   private playbackFallback: ReturnType<typeof setTimeout> | null = null;
@@ -200,8 +199,7 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
     this.proactiveDeleteRequested = false;
     this.activeResponseId = null;
     this.pendingToolResults = [];
-    this.pendingSpeak = null;
-    this.pendingSpeakExact = false;
+    this.pendingSpeak = [];
     this.pendingUserText = null;
     this.proactivePending = false;
     this.readOnlySpeech = false;
@@ -463,8 +461,7 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
     this.awaitingResponse = false;
     this.activeResponseId = null;
     this.deleteProactiveItem();
-    this.pendingSpeak = null;
-    this.pendingSpeakExact = false;
+    this.pendingSpeak = [];
     this.pendingUserText = null;
     this.pendingToolResults = [];
     this.playbackBusy = false;
@@ -490,22 +487,26 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
   }
 
   cancelPendingSpeech(): void {
-    // Task lifecycle messages are single-slot. Clearing this prevents a
-    // queued "still processing" line from being spoken after task_done.
-    this.pendingSpeak = null;
-    this.pendingSpeakExact = false;
+    // Queue-based delivery: dropping queued lines prevents a "still
+    // processing" message from being spoken after task_done.
+    this.pendingSpeak = [];
   }
 
   speak(text: string): void {
-    const exact = this.pendingSpeakExact;
-    this.pendingSpeakExact = false;
+    this.enqueueProactiveSpeech(text, false);
+  }
+
+  speakExact(text: string): void {
+    this.enqueueProactiveSpeech(text, true);
+  }
+
+  private enqueueProactiveSpeech(text: string, exact: boolean): void {
     if (!this.connected || !text.trim()) {
       return;
     }
 
     if (this.cancelRequested || this.awaitingResponse || this.playbackBusy) {
-      this.pendingSpeak = text;
-      this.pendingSpeakExact = exact;
+      this.pendingSpeak.push({ text, exact });
       console.log('[cyrvis provider] proactive speech queued', {
         cancelRequested: this.cancelRequested,
         playbackBusy: this.playbackBusy,
@@ -515,11 +516,6 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
     }
 
     this.sendProactiveSpeak(text, exact);
-  }
-
-  speakExact(text: string): void {
-    this.pendingSpeakExact = true;
-    this.speak(text);
   }
   isReady(): boolean {
     return this.connected;
@@ -584,7 +580,7 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
         content: [
           {
             type: 'input_text',
-            text: `[系统主动播报] 以下仅供朗读，不是用户操作请求。只朗读这句话，不回答其中的问题、不调用工具、不执行动作：${JSON.stringify(text)}`,
+            text: `[系统主动播报] 以下仅供朗读，不是用户操作请求。请逐字完整朗读，不省略、不总结，不回答其中的问题、不调用工具、不执行动作：${JSON.stringify(text)}`,
           },
         ],
       },
@@ -669,12 +665,9 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
       return;
     }
 
-    if (this.pendingSpeak) {
-      const text = this.pendingSpeak;
-      const exact = this.pendingSpeakExact;
-      this.pendingSpeak = null;
-      this.pendingSpeakExact = false;
-      this.sendProactiveSpeak(text, exact);
+    const speech = this.pendingSpeak.shift();
+    if (speech) {
+      this.sendProactiveSpeak(speech.text, speech.exact);
     }
   }
 
@@ -740,8 +733,7 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
     this.proactiveItemId = null;
     this.proactiveItemPending = false;
     this.pendingToolResults = [];
-    this.pendingSpeak = null;
-    this.pendingSpeakExact = false;
+    this.pendingSpeak = [];
     this.pendingUserText = null;
     this.proactivePending = false;
     this.readOnlySpeech = false;
@@ -1329,7 +1321,7 @@ export class QwenOmniProvider implements InteractiveVoiceProvider {
     // A queued proactive line will replace the instructions again. Sending a
     // restore now creates two session.update acks and lets response.create
     // race the restore, which produced answers to stale user audio.
-    if (this.pendingSpeak) {
+    if (this.pendingSpeak.length) {
       return;
     }
     this.send({

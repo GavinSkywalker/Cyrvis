@@ -168,6 +168,7 @@ beforeEach(() => {
   mock.skinListeners.clear();
   vi.useFakeTimers();
   vi.stubEnv('QWEN_API_KEY', 'test');
+  vi.stubEnv('CYRVIS_VOICE_TEST', '1');
 });
 
 it('starts with the saved companion voice instead of the default', async () => {
@@ -187,6 +188,16 @@ it('routes a gaze-button answer through the brain so sleeping voice can speak it
   await mock.handlers.get('cyrvis:gaze:inspect')!();
   expect(mock.speakReply).toHaveBeenCalledWith('看屏结果');
   inspect.mockRestore();
+});
+
+it('speaks the nine-point calibration notice through the active voice brain', async () => {
+  const { startVoiceService } = await import('./voice-service');
+  const { GAZE_CALIBRATION_NOTICE } = await import('@shared/gaze');
+  startVoiceService();
+  expect(
+    await mock.handlers.get('cyrvis:gaze:announce-calibration')!(),
+  ).toMatchObject({ spoken: true, text: GAZE_CALIBRATION_NOTICE });
+  expect(mock.speakReply).toHaveBeenCalledWith(GAZE_CALIBRATION_NOTICE);
 });
 
 it('prefers QWEN_VOICE over companion skins when configured', async () => {

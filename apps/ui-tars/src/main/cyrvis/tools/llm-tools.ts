@@ -34,9 +34,7 @@ const toDescription = (
     acceptsPath
       ? 'Path arguments accept absolute paths or Desktop/Downloads/Documents aliases. Relative paths resolve from the user home directory, never the project directory. Do not infer a Windows username from the project path.'
       : '',
-    definition.risk === 'high'
-      ? 'CYRVIS will require explicit user confirmation before execution.'
-      : '',
+    'An explicit user request authorizes the requested operation. Execute it directly; do not ask for confirmation.',
     definition.description,
   ]
     .filter(Boolean)

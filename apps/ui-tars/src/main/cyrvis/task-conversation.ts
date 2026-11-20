@@ -92,7 +92,12 @@ export class TaskConversationCoordinator {
         ) {
           this.lastStalledAt = eventAt;
           this.lastStalledStep = event.step;
-          this.options.speak('任务还在处理，请稍等。');
+          const summary = this.options.getStatus().lastSummary?.trim();
+          this.options.speak(
+            summary
+              ? `任务仍在处理，步骤 ${event.step}：${summary}。`
+              : `任务仍在处理，当前步骤 ${event.step}。`,
+          );
         }
         break;
       case 'task_needs_user':

@@ -7,18 +7,20 @@ Voice Agent（Qwen Realtime）↔ VoiceBrain ↔ Controller ↔ ElectronGUIAdapt
 
 ## 先看这几份
 
-| 文档                                                             | 内容                                                                |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------- |
-| [architecture.md](./architecture.md)                             | 整体分层、状态机、接口、早期可行性分析                              |
-| [voice-architecture.md](./voice-architecture.md)                 | **当前语音实现权威说明**：采集/播放分进程、打断、双模式、阈值、实测 |
-| [fast-tool-matrix.md](./fast-tool-matrix.md)                     | 前方快速工具矩阵：能力、Router、安全策略、MCP 与扩展方式            |
-| [tool-matrix-capability-map.md](./tool-matrix-capability-map.md) | 当前 81 个工具的分类、功能、层级、缺口、边界和项目定位              |
-| [dynamic-tool-context.md](./dynamic-tool-context.md)             | 用户上下文、动态资源、能力绑定、相关性排序和 Provider 激活          |
-| [dynamic-perception.md](./dynamic-perception.md)                 | 通用感知 Provider、增量资源、刷新调度、浏览器标签页和验证闭环       |
-| [provider-manifests.md](./provider-manifests.md)                 | 动态 Provider manifest、签名、权限、MCP 生命周期与审计              |
-| [system-awareness.md](./system-awareness.md)                     | 系统状态感知、软件发现、Steam、动态能力和任务交互                   |
-| [roadmap.md](./roadmap.md)                                       | 后续重点：GUI 加速 + MCP + 简单任务直连、UI、眼动、主动性/记忆      |
-| [development.md](./development.md)                               | 环境、启动、测试、日志、密钥与常见故障                              |
+| 文档                                                                                   | 内容                                                                |
+| -------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| [architecture.md](./architecture.md)                                                   | 整体分层、状态机、接口、早期可行性分析                              |
+| [voice-architecture.md](./voice-architecture.md)                                       | **当前语音实现权威说明**：采集/播放分进程、打断、双模式、阈值、实测 |
+| [fast-tool-matrix.md](./fast-tool-matrix.md)                                           | 前方快速工具矩阵：能力、Router、安全策略、MCP 与扩展方式            |
+| [tool-matrix-capability-map.md](./tool-matrix-capability-map.md)                       | 基础 89、统一运行时 114 个工具的分类、层级、边界和项目定位          |
+| [qwen-doc-ppt.md](./qwen-doc-ppt.md)                                                   | Qwen-Doc-Turbo PPT 生成协议、配置和降级链                           |
+| [dynamic-tool-context.md](./dynamic-tool-context.md)                                   | 用户上下文、动态资源、能力绑定、相关性排序和 Provider 激活          |
+| [dynamic-perception.md](./dynamic-perception.md)                                       | 通用感知 Provider、增量资源、刷新调度、浏览器标签页和验证闭环       |
+| [cyrvis-orchestration-runtime-20261120.md](./cyrvis-orchestration-runtime-20261120.md) | 统一世界状态、任务调度、自主意图与能力合成控制面                    |
+| [provider-manifests.md](./provider-manifests.md)                                       | 动态 Provider manifest、签名、权限、MCP 生命周期与审计              |
+| [system-awareness.md](./system-awareness.md)                                           | 系统状态感知、软件发现、Steam、动态能力和任务交互                   |
+| [roadmap.md](./roadmap.md)                                                             | 后续重点：GUI 加速 + MCP + 简单任务直连、UI、眼动、主动性/记忆      |
+| [development.md](./development.md)                                                     | 环境、启动、测试、日志、密钥与常见故障                              |
 
 ## 过程记录
 

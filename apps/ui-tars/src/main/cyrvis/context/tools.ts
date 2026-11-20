@@ -87,6 +87,7 @@ export const createContextTools = (
           fallbackResourceIds: snapshot.fallbackResourceIds,
           bindings: snapshot.bindings.filter((binding) => binding.active),
           perception: context.getPerceptionStatuses(),
+          intent: context.intent.getSnapshot(),
         },
       );
     },
@@ -173,6 +174,45 @@ export const createContextTools = (
           resources,
           bindings,
         },
+      );
+    },
+  },
+  {
+    name: 'context.intent',
+    domain: 'context',
+    description:
+      'Read the fused user activity and intent state derived from the active application, focus, recent speech, conversation history, task state, and recent gaze target. Treat it as a probabilistic clue, not execution authorization.',
+    risk: 'low',
+    capability: {
+      providerId: 'context',
+      tier: 2,
+      activation: 'on-demand',
+      priority: 66,
+      tags: [
+        'intent',
+        'activity',
+        'gaze',
+        'voice',
+        'context',
+        '意图',
+        '活动',
+        '眼动',
+        '语音',
+      ],
+      permissions: ['system.read'],
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
+    },
+    prepare: () => ({}),
+    async execute() {
+      const intent = context.intent.getSnapshot();
+      return success(
+        'context.intent',
+        `当前活动判断为 ${intent.activity}。`,
+        intent,
       );
     },
   },
