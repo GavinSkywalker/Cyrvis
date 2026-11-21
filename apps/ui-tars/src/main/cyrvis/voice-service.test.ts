@@ -23,6 +23,7 @@ const mock = vi.hoisted(() => ({
   captureClose: vi.fn(),
   provider: {
     sendAudio: vi.fn(),
+    muteMicFor: vi.fn(),
     bargeIn: vi.fn(),
     clearAudioBuffer: vi.fn(),
     notifyPlaybackIdle: vi.fn(),
@@ -378,4 +379,20 @@ it('keeps voice paused when the companion is changed', async () => {
     'cyrvis:voice:capture-ready',
     expect.anything(),
   );
+});
+
+it('rejects unverified speaker interruption instead of invoking the legacy energy path', async () => {
+  const { startVoiceService } = await import('./voice-service');
+  startVoiceService();
+  await mock.handlers.get('cyrvis:voice:set-mode')!(undefined, 'speaker');
+  mock.events.get('cyrvis:voice:cancel-speech-only')!(undefined);
+  await vi.advanceTimersByTimeAsync(500);
+  expect(mock.provider.bargeIn).not.toHaveBeenCalled();
+  mock.readoutActive = true;
+  mock.events.get('cyrvis:voice:cancel-speech-only')!(undefined, {
+    speakerVerified: true,
+  });
+  expect(mock.provider.bargeIn).toHaveBeenCalledExactlyOnceWith({
+    forceCommit: false,
+  });
 });

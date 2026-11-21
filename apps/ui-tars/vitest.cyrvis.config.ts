@@ -15,6 +15,7 @@ export default defineConfig({
       'src/renderer/src/components/CyrvisGaze/*.test.ts',
       'src/shared/*.test.ts',
       'src/renderer/src/components/CyrvisVoice/*.test.ts',
+      'src/renderer/src/utils/{qwenTtsStream,breezeTtsStream}.test.ts',
     ],
     exclude: ['node_modules/**'],
   },

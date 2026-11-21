@@ -26,6 +26,11 @@ export type QwenTtsStreamConfig = {
   firstMaximumChars?: number;
   onSpeaking?: (text: string) => void;
   onFirstAudio?: () => void;
+  onPlaybackReference?: (
+    pcm: Int16Array,
+    startedAt: number,
+    sampleRate: number,
+  ) => void;
 };
 
 const delay = (ms: number) =>
@@ -117,6 +122,11 @@ export class QwenTtsStreamingPlayer {
       this.nextAudioAt,
     );
     source.start(startAt);
+    this.config.onPlaybackReference?.(
+      new Int16Array(buffer.slice(0)),
+      Date.now() + (startAt - audioContext.currentTime) * 1000,
+      this.sampleRate,
+    );
     this.nextAudioAt = startAt + audioBuffer.duration;
     this.activeSources.add(source);
     source.onended = () => this.activeSources.delete(source);

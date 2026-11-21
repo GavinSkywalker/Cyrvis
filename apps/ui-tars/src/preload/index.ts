@@ -274,7 +274,8 @@ const electronHandler = {
     notifyPlaybackStopped: (info?: { queuedMs?: number }) =>
       ipcRenderer.send('cyrvis:voice:playback-stopped', info),
     bargeIn: () => ipcRenderer.send('cyrvis:voice:barge-in'),
-    cancelSpeechOnly: () => ipcRenderer.send('cyrvis:voice:cancel-speech-only'),
+    cancelSpeechOnly: (info?: { speakerVerified?: boolean }) =>
+      ipcRenderer.send('cyrvis:voice:cancel-speech-only', info),
     forceAwake: () => ipcRenderer.send('cyrvis:voice:force-awake'),
     sleep: () => ipcRenderer.send('cyrvis:voice:sleep'),
     onAudio: (callback: (pcm16: Int16Array) => void) => {

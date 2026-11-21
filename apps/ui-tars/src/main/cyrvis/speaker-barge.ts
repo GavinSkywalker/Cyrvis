@@ -13,6 +13,7 @@ const AMBIGUOUS_CORRELATION = 0.18;
 interface ReferenceSegment {
   samples: Float32Array;
   startedAt: number;
+  integral?: Float64Array;
 }
 
 export interface SpeakerEchoAnalysis {
@@ -115,14 +116,21 @@ export class SpeakerEchoDetector {
   // dropped every near-term reference as soon as the queue was scheduled.
   private clock = 0;
 
+  constructor(private readonly fineAlignment = false) {}
+
   addReference(pcm24k: Int16Array, startedAt = Date.now()): void {
     if (!pcm24k.length) {
       return;
     }
-    this.references.push({
-      samples: resample24kTo16k(toFloat(pcm24k.slice())),
-      startedAt,
-    });
+    const samples = resample24kTo16k(toFloat(pcm24k.slice()));
+    const integral = this.fineAlignment
+      ? new Float64Array(samples.length + 1)
+      : undefined;
+    if (integral) {
+      for (let index = 0; index < samples.length; index++)
+        integral[index + 1] = integral[index] + samples[index];
+    }
+    this.references.push({ samples, startedAt, integral });
     if (this.clock > 0) {
       this.prune(this.clock);
     }
@@ -167,30 +175,81 @@ export class SpeakerEchoDetector {
       if (segment.startedAt > now) {
         continue;
       }
-      for (
-        let delayMs = 0;
-        delayMs <= MAX_ECHO_DELAY_MS;
-        delayMs += ECHO_DELAY_STEP_MS
-      ) {
-        const ageMs = now - segment.startedAt - delayMs;
-        if (ageMs < 0) {
-          continue;
+      if (this.fineAlignment && segment.integral) {
+        // Find timing at 1 ms resolution on a low-pass signal, then refine
+        // sample-by-sample. A 20 ms-only search can miss perfectly ordinary
+        // speaker delays (e.g. 147 ms) and mistake pure echo for new speech.
+        const blockSize = 16;
+        const size = Math.floor(microphone.length / blockSize);
+        if (!size) continue;
+        const micBlocks = new Float32Array(size);
+        for (let block = 0; block < size; block++) {
+          for (let offset = 0; offset < blockSize; offset++)
+            micBlocks[block] +=
+              microphone[block * blockSize + offset] / blockSize;
         }
-        const end = Math.floor((ageMs * MIC_SAMPLE_RATE) / 1000);
-        const start = end - microphone.length;
-        if (start < 0 || end > segment.samples.length) {
-          continue;
+        const refBlocks = new Float32Array(size);
+        const latestEnd = Math.floor(
+          ((now - segment.startedAt) * MIC_SAMPLE_RATE) / 1000,
+        );
+        let bestStart = -1;
+        let coarseScore = 0;
+        for (
+          let delay = 0;
+          delay <= MAX_ECHO_DELAY_MS * 16;
+          delay += blockSize
+        ) {
+          const end = latestEnd - delay;
+          const start = end - microphone.length;
+          if (start < 0 || end > segment.samples.length) continue;
+          for (let block = 0; block < size; block++) {
+            const left = start + block * blockSize;
+            refBlocks[block] =
+              (segment.integral[left + blockSize] - segment.integral[left]) /
+              blockSize;
+          }
+          const score = correlation(micBlocks, refBlocks);
+          if (score > coarseScore) {
+            coarseScore = score;
+            bestStart = start;
+          }
         }
-        const reference = segment.samples.subarray(start, end);
-        const referenceRms = rms(reference);
-        if (referenceRms < MIN_REFERENCE_RMS / 0x8000) {
-          continue;
+        if (bestStart < 0) continue;
+        for (let shift = -blockSize; shift <= blockSize; shift++) {
+          const start = bestStart + shift;
+          if (start < 0 || start + microphone.length > segment.samples.length)
+            continue;
+          const reference = segment.samples.subarray(
+            start,
+            start + microphone.length,
+          );
+          if (rms(reference) < MIN_REFERENCE_RMS / 0x8000) continue;
+          const score = correlation(microphone, reference);
+          if (score > bestCorrelation) {
+            bestCorrelation = score;
+            bestReferenceAverage = averageAbsolute(reference);
+            bestReference = reference;
+          }
         }
-        const score = correlation(microphone, reference);
-        if (score > bestCorrelation) {
-          bestCorrelation = score;
-          bestReferenceAverage = averageAbsolute(reference);
-          bestReference = reference;
+      } else {
+        for (
+          let delayMs = 0;
+          delayMs <= MAX_ECHO_DELAY_MS;
+          delayMs += ECHO_DELAY_STEP_MS
+        ) {
+          const ageMs = now - segment.startedAt - delayMs;
+          if (ageMs < 0) continue;
+          const end = Math.floor((ageMs * MIC_SAMPLE_RATE) / 1000);
+          const start = end - microphone.length;
+          if (start < 0 || end > segment.samples.length) continue;
+          const reference = segment.samples.subarray(start, end);
+          if (rms(reference) < MIN_REFERENCE_RMS / 0x8000) continue;
+          const score = correlation(microphone, reference);
+          if (score > bestCorrelation) {
+            bestCorrelation = score;
+            bestReferenceAverage = averageAbsolute(reference);
+            bestReference = reference;
+          }
         }
       }
     }
@@ -244,3 +303,22 @@ export class SpeakerEchoDetector {
     );
   }
 }
+
+/** Conservative double-talk gate, used before stopping local playback. */
+export const isNearEndSpeech = (
+  analysis: SpeakerEchoAnalysis,
+  minimumRms: number,
+): boolean => {
+  if (
+    !analysis.referenceActive ||
+    analysis.likelyEcho ||
+    analysis.correlation >= 0.5
+  )
+    return false;
+  let energy = 0;
+  for (const sample of analysis.residual) energy += (sample / 0x8000) ** 2;
+  const residualRms = analysis.residual.length
+    ? Math.sqrt(energy / analysis.residual.length)
+    : 0;
+  return residualRms >= minimumRms;
+};

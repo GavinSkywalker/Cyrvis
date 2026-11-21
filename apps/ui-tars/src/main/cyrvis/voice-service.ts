@@ -1,3 +1,4 @@
+import { isSpeakerOutputLabel } from '@shared/audioOutput';
 import { gazeChat } from './gaze/chat';
 import { DesktopGazeCursor } from './gaze/cursor';
 import { gazeInspector } from './gaze/desktop-inspector';
@@ -176,16 +177,6 @@ export const publishProactiveText = (text: string): void => {
   });
 };
 
-const isExternalOutputLabel = (label: string): boolean => {
-  const lower = label.toLowerCase();
-  if (/cc ultimate|airpods|耳机|headset|bluetooth/.test(lower)) {
-    return false;
-  }
-  return /realtek|nvidia|扬声器|speaker|digital output|hdmi|display/.test(
-    lower,
-  );
-};
-
 const CAPTURE_BARGE_THRESHOLD = 1500;
 const CAPTURE_BARGE_SUSTAIN_MS = 180;
 const SPEAKER_REVERB_GUARD_MS = 1400;
@@ -285,7 +276,6 @@ interface SpeakerProbeState {
 
 const speakerEchoDetector = new SpeakerEchoDetector();
 let speakerProbe: SpeakerProbeState | null = null;
-let speakerBargeConfirmTimer: ReturnType<typeof setTimeout> | null = null;
 let speakerCandidateMs = 0;
 // Headset mode has no meaningful speaker echo; use direct energy barge so a
 // short "停" is never lost to a 700ms probe confirmation window.
@@ -1157,10 +1147,6 @@ const triggerBargeIn = (hardStop = false) => {
   if (!service) {
     return;
   }
-  if (speakerBargeConfirmTimer) {
-    clearTimeout(speakerBargeConfirmTimer);
-    speakerBargeConfirmTimer = null;
-  }
   logger.info('[cyrvis voice] barge-in');
   if (bargeTrace) {
     bargeTrace.bargeAt = Date.now();
@@ -1689,7 +1675,7 @@ const registerVoiceIpc = () => {
     resetSpeakerDetection();
     logger.info('[cyrvis voice] audio mode', {
       mode: audioMode,
-      echoCancellation: false,
+      captureOwner: rendererCapture ? 'renderer' : 'main',
     });
     broadcast('cyrvis:voice:audio-mode', { mode: audioMode });
     if (changed && selectedVoiceEngine === 'omni' && !rendererCapture) {
@@ -1715,7 +1701,7 @@ const registerVoiceIpc = () => {
     if (speakerProbe) {
       broadcast('cyrvis:voice:playback-resume');
     }
-    externalOutput = isExternalOutputLabel(label);
+    externalOutput = isSpeakerOutputLabel(label);
     keywordRejectUntil = 0;
     keywordGate?.reset();
     resetSpeakerDetection();
@@ -1801,66 +1787,34 @@ const registerVoiceIpc = () => {
     triggerBargeIn();
   });
 
-  ipcMain.on('cyrvis:voice:cancel-speech-only', () => {
-    if (!service) {
-      return;
-    }
-    if (service.brain.isReadoutSpeechActive()) {
-      logger.info('[cyrvis gaze] ignored energy-only interruption of readout');
-      return;
-    }
-    const runBarge = () => {
+  ipcMain.on(
+    'cyrvis:voice:cancel-speech-only',
+    (_event, info?: { speakerVerified?: boolean }) => {
       if (!service) {
         return;
       }
-      logger.info('[cyrvis voice] speech-only barge-in');
+      // Only the renderer's playback-reference gate can authorize automatic
+      // speaker interruption. Explicit stop uses the separate barge-in channel.
+      const verifiedSpeaker = info?.speakerVerified === true;
+      if ((speakerOutputMode || externalOutput) && !verifiedSpeaker) {
+        logger.info('[cyrvis voice] ignored unverified speaker interruption');
+        return;
+      }
+      if (service.brain.isReadoutSpeechActive() && !verifiedSpeaker) {
+        logger.info(
+          '[cyrvis gaze] ignored energy-only interruption of readout',
+        );
+        return;
+      }
+      logger.info('[cyrvis voice] speech-only barge-in', { verifiedSpeaker });
       assistantPlaybackActive = false;
       service.provider.bargeIn({ forceCommit: false });
       service.brain.handleBargeStop();
       service.provider.muteMicFor(BARGE_MIC_TAIL_MS[selectedVoiceEngine]);
       service.brain.forceAwake();
       broadcast('cyrvis:voice:response-stopped');
-    };
-
-    if (speakerOutputMode || externalOutput) {
-      // Legacy fast mode: accept energy barge immediately (yesterday's feel).
-      // Echo protection still comes from the renderer threshold + AEC and the
-      // transcript echo filters; it is not perfect and can self-interrupt.
-      // Set CYRVIS_SPEAKER_BARGE_FAST=0 to restore the 200ms VAD gate.
-      if (process.env.CYRVIS_SPEAKER_BARGE_FAST !== '0') {
-        if (service.brain.isTaskSpeechActive()) {
-          logger.info(
-            '[cyrvis voice] speaker energy barge ignored during task speech',
-          );
-          return;
-        }
-        logger.info('[cyrvis voice] speaker energy barge immediate (legacy)');
-        runBarge();
-        return;
-      }
-      if (service.brain.getState().userSpeaking) {
-        runBarge();
-        return;
-      }
-      if (speakerBargeConfirmTimer) {
-        clearTimeout(speakerBargeConfirmTimer);
-      }
-      speakerBargeConfirmTimer = setTimeout(() => {
-        speakerBargeConfirmTimer = null;
-        if (service?.brain.getState().userSpeaking) {
-          logger.info('[cyrvis voice] speaker energy barge confirmed by VAD');
-          runBarge();
-        } else {
-          logger.info(
-            '[cyrvis voice] speaker energy barge ignored (no local speech)',
-          );
-        }
-      }, 200);
-      return;
-    }
-
-    runBarge();
-  });
+    },
+  );
 
   ipcMain.on('cyrvis:voice:force-awake', () => {
     service?.brain.forceAwake();

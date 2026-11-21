@@ -7,9 +7,22 @@ import { useVoiceAudio } from './useVoiceAudio';
 vi.mock('@renderer/hooks/useSetting', () => ({
   useSetting: () => ({ settings: { voiceEngine: 'omni' } }),
 }));
-const playback = vi.hoisted(() => ({ stop: vi.fn(), play: vi.fn() }));
+const playback = vi.hoisted(() => ({
+  stop: vi.fn(),
+  play: vi.fn(),
+  reference: undefined as
+    | undefined
+    | ((pcm: Int16Array, startedAt: number) => void),
+}));
 vi.mock('./webaudio-player', () => ({
   WebAudioStreamPlayer: class {
+    constructor(
+      _idle: unknown,
+      _error: unknown,
+      reference: typeof playback.reference,
+    ) {
+      playback.reference = reference;
+    }
     play = playback.play;
     stop = playback.stop;
   },
@@ -19,13 +32,15 @@ let root: Root | undefined;
 afterEach(async () => {
   await act(async () => root?.unmount());
   root = undefined;
+  vi.useRealTimers();
+  playback.reference = undefined;
   vi.unstubAllGlobals();
   vi.clearAllMocks();
   document.body.innerHTML = '';
   localStorage.clear();
 });
 
-it('keeps gaze readout playing through mic energy while feeding stop-word audio and retaining explicit stop', async () => {
+async function setupVoice(outputLabel?: string) {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   const events = new Map<string, (...args: any[]) => void>();
   const methods: Record<string, any> = {
@@ -61,7 +76,11 @@ it('keeps gaze readout playing through mic energy while feeding stop-word audio 
         getAudioTracks: () => [track],
         getTracks: () => [track],
       })),
-      enumerateDevices: vi.fn(async () => []),
+      enumerateDevices: vi.fn(async () =>
+        outputLabel
+          ? [{ kind: 'audiooutput', deviceId: 'default', label: outputLabel }]
+          : [],
+      ),
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
     },
@@ -95,6 +114,18 @@ it('keeps gaze readout playing through mic energy while feeding stop-word audio 
   await act(async () => root!.render(React.createElement(Harness)));
   await act(async () => audio.start());
   expect(audio.micReady).toBe(true);
+  return { audio: () => audio, voice, events, processors };
+}
+
+it('keeps gaze readout playing through mic energy while feeding stop-word audio and retaining explicit stop', async () => {
+  const { audio: getAudio, voice, events, processors } = await setupVoice();
+  const audio = getAudio();
+  expect(navigator.mediaDevices.getUserMedia).toHaveBeenNthCalledWith(1, {
+    audio: expect.objectContaining({ echoCancellation: true }),
+  });
+  expect(navigator.mediaDevices.getUserMedia).toHaveBeenNthCalledWith(2, {
+    audio: expect.objectContaining({ echoCancellation: false }),
+  });
   await act(async () => {
     events.get('onState')!({
       awake: true,
@@ -122,4 +153,96 @@ it('keeps gaze readout playing through mic energy while feeding stop-word audio 
     for (let i = 0; i < 5; i++) processors[0].onaudioprocess(loudMic);
   });
   expect(voice.cancelSpeechOnly).toHaveBeenCalledOnce();
+});
+
+// Match the actual reference resampling, then upsample to the capture rate.
+function makeReference(seed: number) {
+  let state = seed;
+  return Int16Array.from({ length: 96_000 }, () => {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    return Math.round((state / 0xffffffff - 0.5) * 24_000);
+  });
+}
+function micFrame(reference: Int16Array, elapsedMs: number, nearEnd: boolean) {
+  const end = Math.floor(elapsedMs * 16);
+  return Float32Array.from({ length: 4095 }, (_, index) => {
+    const position = (end - 1365 + Math.floor(index / 3)) * 1.5;
+    const left = Math.floor(position);
+    const fraction = position - left;
+    const echo =
+      (reference[left] * (1 - fraction) + reference[left + 1] * fraction) /
+      32768;
+    const user = nearEnd ? Math.sin(Math.floor(index / 3) * 0.217) * 0.3 : 0;
+    return echo * 0.6 + user;
+  });
+}
+
+it('protects speaker playback from loud echo, then accepts sustained independent speech even during readout', async () => {
+  vi.useFakeTimers();
+  const base = 100_000;
+  vi.setSystemTime(base);
+  const { audio, voice, events, processors } = await setupVoice();
+  await act(async () => audio().selectAudioMode('speaker'));
+  await act(async () => {
+    events.get('onState')!({ awake: true, readoutGuardUntil: base + 45_000 });
+    events.get('onAudio')!(new Int16Array([10, 20]));
+  });
+  const reference = makeReference(27);
+  playback.reference!(reference, base);
+  playback.stop.mockClear();
+  await act(async () => {
+    for (let ms = 1000; ms <= 1400; ms += 100) {
+      vi.setSystemTime(base + ms);
+      processors[0].onaudioprocess({
+        inputBuffer: { getChannelData: () => micFrame(reference, ms, false) },
+      });
+    }
+  });
+  expect(voice.cancelSpeechOnly).not.toHaveBeenCalled();
+  expect(playback.stop).not.toHaveBeenCalled();
+  await act(async () => {
+    for (let ms = 1500; ms <= 1700; ms += 100) {
+      vi.setSystemTime(base + ms);
+      processors[0].onaudioprocess({
+        inputBuffer: { getChannelData: () => micFrame(reference, ms, true) },
+      });
+    }
+  });
+  expect(voice.cancelSpeechOnly).toHaveBeenCalledExactlyOnceWith({
+    speakerVerified: true,
+  });
+  expect(playback.stop).toHaveBeenCalledOnce();
+  expect(voice.beginUtterance).toHaveBeenCalled();
+});
+
+it('keeps speaker playback protected when reference audio has not arrived; explicit stop remains available', async () => {
+  const { audio, voice, events, processors } = await setupVoice();
+  await act(async () => audio().selectAudioMode('speaker'));
+  await act(async () => {
+    events.get('onAudio')!(new Int16Array([10, 20]));
+    for (let i = 0; i < 10; i++)
+      processors[0].onaudioprocess({
+        inputBuffer: { getChannelData: () => new Float32Array(4096).fill(0.3) },
+      });
+  });
+  expect(voice.cancelSpeechOnly).not.toHaveBeenCalled();
+  await act(async () => audio().interrupt());
+  expect(voice.bargeIn).toHaveBeenCalledOnce();
+});
+
+it('protects actual built-in speakers even if the saved UI mode says headset', async () => {
+  const { events, voice, processors } = await setupVoice(
+    'Default - MacBook Pro Speakers',
+  );
+  await act(async () => {
+    events.get('onAudio')!(new Int16Array([10, 20]));
+    for (let i = 0; i < 8; i++)
+      processors[0].onaudioprocess({
+        inputBuffer: { getChannelData: () => new Float32Array(4096).fill(0.3) },
+      });
+  });
+  expect(voice.setOutput).toHaveBeenCalledWith(
+    'Default - MacBook Pro Speakers',
+  );
+  expect(voice.cancelSpeechOnly).not.toHaveBeenCalled();
 });

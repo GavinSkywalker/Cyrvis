@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { SpeakerEchoDetector } from './speaker-barge';
+import { SpeakerEchoDetector, isNearEndSpeech } from './speaker-barge';
 
 const makeNoise = (length: number, seed: number): Int16Array => {
   const output = new Int16Array(length);
@@ -121,4 +121,19 @@ describe('SpeakerEchoDetector', () => {
     expect(result.referenceActive).toBe(false);
     expect(result.likelyEcho).toBe(false);
   });
+});
+
+it('aligns speaker echo between the old 20 ms delay grid without classifying it as near-end speech', () => {
+  const reference = makeNoise(48_000, 17);
+  const reference16k = downsample24kTo16k(reference);
+  const end = 16_000 - 2357; // 147.3125 ms speaker delay, deliberately off-grid.
+  const mic = reference16k.slice(end - 1365, end);
+  const detector = new SpeakerEchoDetector(true);
+  detector.addReference(reference, 1000);
+  const result = detector.analyze(mic, 2000);
+  expect(result.correlation).toBeGreaterThan(0.99);
+  expect(isNearEndSpeech(result, 0.05)).toBe(false);
+  expect(
+    isNearEndSpeech(detector.analyze(makeNoise(1365, 999), 2000), 0.05),
+  ).toBe(true);
 });

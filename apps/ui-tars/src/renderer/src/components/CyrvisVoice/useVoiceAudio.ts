@@ -1,3 +1,8 @@
+import {
+  SpeakerEchoDetector,
+  isNearEndSpeech,
+} from '@main/cyrvis/speaker-barge';
+import { isSpeakerOutputLabel } from '@shared/audioOutput';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import {
@@ -220,6 +225,8 @@ export function useVoiceAudio() {
   const speechFramesRef = useRef(0);
   const bargeFramesRef = useRef(0);
   const audioModeRef = useRef<'headset' | 'speaker'>('headset');
+  const speakerOutputRef = useRef(false);
+  const echoDetectorRef = useRef(new SpeakerEchoDetector(true));
   const lastBargeDiagRef = useRef(0);
 
   settingsRef.current = settings;
@@ -254,6 +261,8 @@ export function useVoiceAudio() {
       );
     readoutIdRef.current = undefined;
     readoutPlayingRef.current = false;
+    echoDetectorRef.current.reset();
+    bargeFramesRef.current = 0;
     playerEpochRef.current += 1;
     const player = playerRef.current;
     playerRef.current = null;
@@ -276,81 +285,119 @@ export function useVoiceAudio() {
     }
   }, []);
 
-  const createPlayer = useCallback(async (epoch: number) => {
-    const current = settingsRef.current;
-    const provider =
-      current.voiceTtsProvider === 'qwen-tts-realtime'
-        ? 'qwen-tts-realtime'
-        : 'breeze-local';
-    console.info('[cyrvis] creating streaming TTS player', { provider });
-    let player: StreamingPlayer;
-    if (provider === 'qwen-tts-realtime') {
-      player = new QwenTtsStreamingPlayer({
-        requestId: `cyrvis-${Date.now()}`,
-        mode: current.voiceQwenTtsMode || 'commit',
-        language: current.voiceQwenTtsLanguage || 'Chinese',
-        onFirstAudio: () => {
-          if (readoutIdRef.current && !readoutPlayingRef.current) {
-            readoutPlayingRef.current = true;
-            window.electron.voice.reportGazePlayback(
-              readoutIdRef.current,
-              'playing',
+  const addPlaybackReference = useCallback(
+    (pcm: Int16Array, startedAt: number, sampleRate = 24_000) => {
+      // Normalize every playback engine to the detector's 24 kHz reference.
+      const normalized =
+        sampleRate === 24_000
+          ? pcm
+          : Int16Array.from(
+              { length: Math.floor((pcm.length * 24_000) / sampleRate) },
+              (_, index) => {
+                const position = (index * sampleRate) / 24_000;
+                const left = Math.floor(position);
+                const fraction = position - left;
+                return Math.round(
+                  pcm[left] * (1 - fraction) +
+                    pcm[Math.min(left + 1, pcm.length - 1)] * fraction,
+                );
+              },
             );
-          }
-          resolveFirstAudioRef.current?.(true);
-          resolveFirstAudioRef.current = null;
-        },
-      });
-    } else {
-      const readiness = await window.electron.voice.ensureBreezeReady();
-      if (!readiness.ok) {
-        throw new Error(readiness.error || 'Breeze TTS is unavailable');
-      }
-      const voiceId = normalizeBreezeVoiceId(current.voiceTtsVoice);
-      if (voiceId) {
-        const voices = await window.electron.voice.listBreezeVoices();
-        if (!voices.some((voice) => voice.id === voiceId)) {
-          throw new Error(`Selected Breeze voice is unavailable: ${voiceId}`);
+      echoDetectorRef.current.addReference(normalized, startedAt);
+      window.electron.voice.sendPlaybackReference(
+        normalized.slice().buffer as ArrayBuffer,
+        startedAt,
+      );
+    },
+    [],
+  );
+
+  const createPlayer = useCallback(
+    async (epoch: number) => {
+      const current = settingsRef.current;
+      const provider =
+        current.voiceTtsProvider === 'qwen-tts-realtime'
+          ? 'qwen-tts-realtime'
+          : 'breeze-local';
+      console.info('[cyrvis] creating streaming TTS player', { provider });
+      let player: StreamingPlayer;
+      if (provider === 'qwen-tts-realtime') {
+        player = new QwenTtsStreamingPlayer({
+          requestId: `cyrvis-${Date.now()}`,
+          mode: current.voiceQwenTtsMode || 'commit',
+          language: current.voiceQwenTtsLanguage || 'Chinese',
+          onPlaybackReference: (pcm, startedAt, sampleRate) => {
+            if (epoch === playerEpochRef.current)
+              addPlaybackReference(pcm, startedAt, sampleRate);
+          },
+          onFirstAudio: () => {
+            if (readoutIdRef.current && !readoutPlayingRef.current) {
+              readoutPlayingRef.current = true;
+              window.electron.voice.reportGazePlayback(
+                readoutIdRef.current,
+                'playing',
+              );
+            }
+            resolveFirstAudioRef.current?.(true);
+            resolveFirstAudioRef.current = null;
+          },
+        });
+      } else {
+        const readiness = await window.electron.voice.ensureBreezeReady();
+        if (!readiness.ok) {
+          throw new Error(readiness.error || 'Breeze TTS is unavailable');
         }
-      }
-      player = new BreezeStreamingPlayer({
-        wsUrl: toBreezeTtsWebSocketUrl(
-          current.voiceTtsBaseUrl || BREEZE_TTS_DEFAULT_BASE_URL,
-        ),
-        instruction:
-          current.voiceTtsInstruction || BREEZE_TTS_DEFAULT_INSTRUCTION,
-        voiceId,
-        cfgScale: current.voiceTtsCfgScale ?? 1,
-        seed: current.voiceTtsSeed ?? BREEZE_TTS_DEFAULT_SEED,
-        onFirstAudio: () => {
-          if (readoutIdRef.current && !readoutPlayingRef.current) {
-            readoutPlayingRef.current = true;
-            window.electron.voice.reportGazePlayback(
-              readoutIdRef.current,
-              'playing',
-            );
+        const voiceId = normalizeBreezeVoiceId(current.voiceTtsVoice);
+        if (voiceId) {
+          const voices = await window.electron.voice.listBreezeVoices();
+          if (!voices.some((voice) => voice.id === voiceId)) {
+            throw new Error(`Selected Breeze voice is unavailable: ${voiceId}`);
           }
-          resolveFirstAudioRef.current?.(true);
-          resolveFirstAudioRef.current = null;
-        },
-      } satisfies BreezeStreamConfig);
-    }
-    if (epoch !== playerEpochRef.current || !assistantSpeakingRef.current) {
-      player.cancel();
-      return;
-    }
-    await player.start();
-    if (epoch !== playerEpochRef.current || !assistantSpeakingRef.current) {
-      player.cancel();
-      return;
-    }
-    playerRef.current = player;
-    clearIdleTimer();
-    if (speechDeltaRef.current) {
-      player.appendText(speechDeltaRef.current);
-      speechDeltaRef.current = '';
-    }
-  }, []);
+        }
+        player = new BreezeStreamingPlayer({
+          wsUrl: toBreezeTtsWebSocketUrl(
+            current.voiceTtsBaseUrl || BREEZE_TTS_DEFAULT_BASE_URL,
+          ),
+          instruction:
+            current.voiceTtsInstruction || BREEZE_TTS_DEFAULT_INSTRUCTION,
+          voiceId,
+          cfgScale: current.voiceTtsCfgScale ?? 1,
+          seed: current.voiceTtsSeed ?? BREEZE_TTS_DEFAULT_SEED,
+          onPlaybackReference: (pcm, startedAt, sampleRate) => {
+            if (epoch === playerEpochRef.current)
+              addPlaybackReference(pcm, startedAt, sampleRate);
+          },
+          onFirstAudio: () => {
+            if (readoutIdRef.current && !readoutPlayingRef.current) {
+              readoutPlayingRef.current = true;
+              window.electron.voice.reportGazePlayback(
+                readoutIdRef.current,
+                'playing',
+              );
+            }
+            resolveFirstAudioRef.current?.(true);
+            resolveFirstAudioRef.current = null;
+          },
+        } satisfies BreezeStreamConfig);
+      }
+      if (epoch !== playerEpochRef.current || !assistantSpeakingRef.current) {
+        player.cancel();
+        return;
+      }
+      await player.start();
+      if (epoch !== playerEpochRef.current || !assistantSpeakingRef.current) {
+        player.cancel();
+        return;
+      }
+      playerRef.current = player;
+      clearIdleTimer();
+      if (speechDeltaRef.current) {
+        player.appendText(speechDeltaRef.current);
+        speechDeltaRef.current = '';
+      }
+    },
+    [addPlaybackReference],
+  );
 
   const startPlayer = useCallback(() => {
     if (settingsRef.current.voiceTtsEnabled === false) {
@@ -473,7 +520,9 @@ export function useVoiceAudio() {
         // Keep the keyword audio path above live for an explicit "停一下".
         // Energy alone cannot distinguish the user's voice from this readout
         // leaking back through the laptop mic, even in headset UI mode.
-        if (Date.now() < readoutGuardUntilRef.current) {
+        const speakerMode =
+          audioModeRef.current === 'speaker' || speakerOutputRef.current;
+        if (!speakerMode && Date.now() < readoutGuardUntilRef.current) {
           bargeFramesRef.current = 0;
           return;
         }
@@ -482,7 +531,6 @@ export function useVoiceAudio() {
           input,
           MAX_BARGE_PREROLL_CHUNKS,
         );
-        const speakerMode = audioModeRef.current === 'speaker';
         const nowDiag = Date.now();
         const playbackMs = assistantPlaybackStartedAtRef.current
           ? nowDiag - assistantPlaybackStartedAtRef.current
@@ -501,12 +549,28 @@ export function useVoiceAudio() {
             ? SPEAKER_ONSET_BARGE_FRAMES
             : SPEAKER_BARGE_CONFIRMATION_FRAMES
           : BARGE_CONFIRMATION_FRAMES;
+        // Energy alone must never stop speaker playback. Check the actual
+        // scheduled PCM first; missing references and echo remain protected.
+        const echo =
+          speakerMode && rms >= threshold
+            ? echoDetectorRef.current.analyze(
+                new Int16Array(floatToPcm16(samples).buffer),
+              )
+            : null;
+        const nearEnd =
+          !speakerMode || (echo !== null && isNearEndSpeech(echo, threshold));
         if (nowDiag - lastBargeDiagRef.current >= 500) {
           lastBargeDiagRef.current = nowDiag;
           console.log(
             '[cyrvis] barge diag',
             JSON.stringify({
               mode: audioModeRef.current,
+              speakerOutput: speakerOutputRef.current,
+              referenceActive: echo?.referenceActive,
+              echoCorrelation: echo
+                ? Number(echo.correlation.toFixed(3))
+                : undefined,
+              nearEnd,
               phase: speakerMode
                 ? speakerOnset
                   ? 'onset'
@@ -521,7 +585,7 @@ export function useVoiceAudio() {
           );
         }
         bargeFramesRef.current =
-          rms >= threshold ? bargeFramesRef.current + 1 : 0;
+          rms >= threshold && nearEnd ? bargeFramesRef.current + 1 : 0;
         if (bargeFramesRef.current >= confirmationFrames) {
           bargeFramesRef.current = 0;
           bargePendingRef.current = true;
@@ -529,7 +593,9 @@ export function useVoiceAudio() {
           bargePrerollRef.current = [];
           keywordPcmRef.current = new Uint8Array();
           cancelPlayer();
-          window.electron.voice.cancelSpeechOnly();
+          window.electron.voice.cancelSpeechOnly({
+            speakerVerified: speakerMode,
+          });
           beginStreamingUtterance(preRoll);
         }
         return;
@@ -610,6 +676,13 @@ export function useVoiceAudio() {
         deviceId: device.deviceId,
         label: device.label || 'Audio output',
       }));
+    const selected = outputs.find(
+      (item) => item.deviceId === (outputDeviceIdRef.current || 'default'),
+    );
+    speakerOutputRef.current = selected
+      ? isSpeakerOutputLabel(selected.label)
+      : false;
+    if (selected) await window.electron.voice.setOutput(selected.label);
     setOutputDevices(outputs);
     return outputs;
   }, []);
@@ -621,6 +694,8 @@ export function useVoiceAudio() {
       localStorage.setItem('cyrvis.outputDeviceId', deviceId);
       const output = outputDevices.find((item) => item.deviceId === deviceId);
       if (output) {
+        speakerOutputRef.current = isSpeakerOutputLabel(output.label);
+        bargeFramesRef.current = 0;
         await window.electron.voice.setOutput(output.label);
         await legacyPlayerRef.current?.setSinkId(deviceId);
       }
@@ -723,13 +798,10 @@ export function useVoiceAudio() {
     if (mediaStreamRef.current) {
       return;
     }
-    // Headset mode uses the raw microphone so KWS can hear a short "停一下".
-    // Speaker mode keeps AEC to reduce the assistant's own TTS echo. The
-    // raw-speaker trial caused self-interruption on TTS echo (00:05), so it
-    // was rolled back.
-    const stream = await openMicrophoneStream(
-      audioModeRef.current === 'speaker',
-    );
+    // Always request AEC: capture may start before mode restoration, and the
+    // user can change output without reopening this stream. Raw KWS has its
+    // own capture below, so stop-word detection remains available.
+    const stream = await openMicrophoneStream(true);
     mediaStreamRef.current = stream;
     const audioContext = new AudioContext();
     captureContextRef.current = audioContext;
@@ -739,6 +811,7 @@ export function useVoiceAudio() {
       label: captureTrack?.label || '',
       deviceId: captureTrack?.getSettings().deviceId || '',
       sampleRate: audioContext.sampleRate,
+      echoCancellation: captureTrack?.getSettings().echoCancellation,
     });
     await audioContext.resume();
     const source = audioContext.createMediaStreamSource(stream);
@@ -877,6 +950,8 @@ export function useVoiceAudio() {
       if (output) {
         setSelectedOutputId(output.deviceId);
         outputDeviceIdRef.current = output.deviceId;
+        speakerOutputRef.current = isSpeakerOutputLabel(output.label);
+        await window.electron.voice.setOutput(output.label);
       }
     });
 
@@ -927,10 +1002,7 @@ export function useVoiceAudio() {
             },
             (samples, startedAt) => {
               if (epoch !== playerEpochRef.current) return;
-              window.electron.voice.sendPlaybackReference(
-                samples.slice().buffer as ArrayBuffer,
-                startedAt,
-              );
+              addPlaybackReference(samples, startedAt);
               if (id && !readoutPlayingRef.current) {
                 readoutPlayingRef.current = true;
                 window.electron.voice.reportGazePlayback(id, 'playing');

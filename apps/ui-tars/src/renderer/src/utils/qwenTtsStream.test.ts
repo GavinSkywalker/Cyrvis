@@ -74,9 +74,11 @@ describe('Renderer Qwen TTS player', () => {
     });
 
     const onFirstAudio = vi.fn();
+    const onPlaybackReference = vi.fn();
     const player = new QwenTtsStreamingPlayer({
       requestId: 'request-1',
       onFirstAudio,
+      onPlaybackReference,
     });
     await player.start();
     player.appendText('这是一个测试分句，');
@@ -95,6 +97,11 @@ describe('Renderer Qwen TTS player', () => {
       sampleRate: 24_000,
     });
     await vi.waitFor(() => expect(onFirstAudio).toHaveBeenCalledOnce());
+    expect(onPlaybackReference).toHaveBeenCalledWith(
+      new Int16Array([1, 2]),
+      expect.any(Number),
+      24_000,
+    );
     await player.finish();
     expect(finish).toHaveBeenCalledWith({ sessionId: 'session-1' });
   });
