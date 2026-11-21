@@ -19,6 +19,8 @@ const mock = vi.hoisted(() => ({
   offerSuggestion: vi.fn(),
   readoutActive: false,
   objectScan: vi.fn(async () => ({ scene: 'test', objects: [] as any[] })),
+  cursorPoint: vi.fn(),
+  cursorTarget: vi.fn(),
   start: vi.fn(async () => undefined),
   captureClose: vi.fn(),
   provider: {
@@ -104,8 +106,8 @@ vi.mock('./gaze/native-objects', () => ({
 }));
 vi.mock('./gaze/cursor', () => ({
   DesktopGazeCursor: class {
-    update = vi.fn();
-    updateTarget = vi.fn();
+    update = mock.cursorPoint;
+    updateTarget = mock.cursorTarget;
     hide = vi.fn();
     setEnabled = vi.fn();
     toggle = vi.fn();
@@ -356,10 +358,35 @@ it('feeds locked object context into proactive recognition instead of raw jitter
     y: 0.5,
     target: { id: 'cover' },
   });
+  expect(mock.cursorPoint).not.toHaveBeenCalled();
+  expect(mock.cursorTarget).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      phase: 'locked',
+      target: expect.objectContaining({ id: 'cover' }),
+    }),
+  );
   expect(suggest).toHaveBeenCalledOnce();
   mock.handlers.get('cyrvis:gaze:cursor')!(undefined, null);
   expect(getDesktopGaze()).toBeNull();
   suggest.mockRestore();
+});
+
+it('shows the free point only when object snapping is explicitly disabled', async () => {
+  const { startVoiceService } = await import('./voice-service');
+  startVoiceService();
+  const sample = () => ({ x: 0.5, y: 0.5, timestamp: Date.now() });
+  mock.handlers.get('cyrvis:gaze:cursor')!(undefined, sample());
+  await vi.advanceTimersByTimeAsync(50);
+  expect(mock.cursorPoint).not.toHaveBeenCalled();
+  expect(mock.cursorTarget).toHaveBeenLastCalledWith(null);
+  mock.handlers.get('cyrvis:gaze:object-configure')!(undefined, false);
+  const raw = sample();
+  mock.handlers.get('cyrvis:gaze:cursor')!(undefined, raw);
+  expect(mock.cursorPoint).toHaveBeenLastCalledWith(raw);
+  mock.handlers.get('cyrvis:gaze:object-configure')!(undefined, true);
+  mock.cursorPoint.mockClear();
+  mock.handlers.get('cyrvis:gaze:cursor')!(undefined, sample());
+  expect(mock.cursorPoint).not.toHaveBeenCalled();
 });
 
 it('keeps voice paused when the companion is changed', async () => {

@@ -1473,8 +1473,10 @@ const registerVoiceIpc = () => {
   });
   ipcMain.handle('cyrvis:gaze:cursor', (_event, sample) => {
     const gaze = rawGaze(sample);
-    desktopCursor.update(sample);
+    // A frame has one renderer: in snapping mode the tracker owns the box.
+    // Drawing the raw point first resets the target/window every 50ms.
     if (objectTracker.getStatus().enabled) objectTracker.update(gaze);
+    else desktopCursor.update(sample);
     fastToolMatrix?.dynamicContext.observeGaze(
       gazeInspector.getStatus().enabled ? getDesktopGaze() || gaze : null,
     );

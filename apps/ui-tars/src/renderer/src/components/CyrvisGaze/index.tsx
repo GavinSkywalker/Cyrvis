@@ -561,6 +561,11 @@ export default function CyrvisGaze() {
             <p>
               识别在本机完成；应用对象不可读时，本地截图检测图像区域和文字，不发送到模型。AI看屏与主动提醒需另行开启。
             </p>
+            {!objects.enabled && stage === 'tracking' && (
+              <p role="status">
+                对象吸附已关闭，当前仅显示绿色位置光标；勾选上方“对象吸附”可显示对象框。
+              </p>
+            )}
             {objects.enabled && stage === 'tracking' && (
               <>
                 <p role="status">
@@ -570,7 +575,9 @@ export default function CyrvisGaze() {
                       ? `候选：${objects.target?.label || '界面对象'}`
                       : objects.phase === 'ambiguous'
                         ? '附近有多个候选，请看向目标中央'
-                        : '寻找附近的界面对象…'}
+                        : objects.objects > 0
+                          ? `本地识别到 ${objects.objects} 个对象，请看向目标中央以吸附。`
+                          : '尚未识别到附近对象，正在本地扫描…'}
                 </p>
                 <progress
                   aria-label="对象注视锁定进度"
