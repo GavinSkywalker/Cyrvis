@@ -79,24 +79,7 @@ export class DesktopGazeCursor {
 
   updateTarget(state: ObjectFixation | null) {
     if (!state?.target) {
-      this.target = null;
-      if (
-        !this.lastSampleAt ||
-        Date.now() - this.lastSampleAt >= CURSOR_STALE_MS
-      ) {
-        this.hide();
-        return;
-      }
-      if (!this.enabled) return;
-      this.ensureWindow();
-      if (this.loaded) {
-        this.window?.setSize(SIZE, SIZE, false);
-        this.window?.setPosition(this.position.x, this.position.y, false);
-        this.paint();
-        if (!this.suspended && !this.window?.isVisible()) {
-          this.window?.showInactive();
-        }
-      }
+      this.hide();
       return;
     }
     this.target = state;

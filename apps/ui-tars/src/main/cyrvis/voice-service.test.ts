@@ -206,16 +206,6 @@ it('routes a gaze-button answer through the brain so sleeping voice can speak it
   inspect.mockRestore();
 });
 
-it('speaks the nine-point calibration notice through the active voice brain', async () => {
-  const { startVoiceService } = await import('./voice-service');
-  const { GAZE_CALIBRATION_NOTICE } = await import('@shared/gaze');
-  startVoiceService();
-  expect(
-    await mock.handlers.get('cyrvis:gaze:announce-calibration')!(),
-  ).toMatchObject({ spoken: true, text: GAZE_CALIBRATION_NOTICE });
-  expect(mock.speakReply).toHaveBeenCalledWith(GAZE_CALIBRATION_NOTICE);
-});
-
 it('prefers QWEN_VOICE over companion skins when configured', async () => {
   vi.stubEnv('QWEN_VOICE', 'longanqian');
   mock.skinId = 'jarvis';

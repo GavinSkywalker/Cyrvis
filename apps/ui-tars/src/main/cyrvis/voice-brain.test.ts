@@ -199,6 +199,26 @@ afterEach(() => {
 });
 
 describe('VoiceBrain', () => {
+  it.each(['打开桌面上最近的那个文件', '打开下载里的那个 report.txt'])(
+    'keeps the main file routing for %s while retaining explicit gaze references',
+    async (request) => {
+      const getGazeActionContext = vi.fn(() => null);
+      const { brain, provider, adapter } = setup({
+        requireWakeWord: false,
+        getGazeActionContext,
+      });
+      await brain.start();
+      provider.emitTranscript(request);
+      await flush();
+      expect(getGazeActionContext).not.toHaveBeenCalled();
+      expect(adapter.instruction).toBe('');
+      provider.emitTranscript('打开我正在看的这个文件');
+      await flush();
+      expect(getGazeActionContext).toHaveBeenCalledOnce();
+      brain.dispose();
+    },
+  );
+
   it('supersedes an early read-only gaze tool when ASR confirms the user asked for a GUI action', async () => {
     let finish!: (value: string) => void;
     const gaze = {
@@ -327,8 +347,11 @@ describe('VoiceBrain', () => {
     await flush();
     expect(controller.getStatus().status).toBe('executing');
     expect(adapter.instruction).toContain('[已绑定注视对象]');
-    expect(adapter.instruction).toContain('点击该对象并执行用户要求的播放操作');
-    expect(adapter.instruction).toContain('依据实际界面变化报告结果');
+    expect(adapter.instruction).toContain('点击该歌单/作品并开始播放');
+    expect(adapter.instruction).toContain('不要求先从封面认出作品名');
+    expect(adapter.instruction).toContain(
+      '确认播放器的播放/暂停状态或曲目信息后再报告播放成功',
+    );
     expect(provider.submitted).toEqual([]);
     expect(provider.spoken.join('')).not.toContain('播放成功');
     provider.emitToolCall({

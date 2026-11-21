@@ -29,7 +29,6 @@ import { logger } from '@main/logger';
 import { getCompanionStore } from '@main/store/companion';
 import { resolveCompanionSkin } from '@shared/companion-skins';
 import type { CompanionTask } from '@shared/companion';
-import { GAZE_CALIBRATION_NOTICE } from '@shared/gaze';
 import { SettingStore } from '@main/store/setting';
 import { breezeTtsService } from '@main/services/breezeTts';
 import { qwenTtsRealtimeService } from '@main/services/qwenTtsRealtime';
@@ -184,7 +183,6 @@ let speakerOutputMode = false;
 // barge must not run: the mic hears the assistant's own speaker output.
 let externalOutput = false;
 let speakerGuardUntil = 0;
-let criticalAnnouncementUntil = 0;
 let lastAssistantText = '';
 let lastAssistantAt = 0;
 let ipcRegistered = false;
@@ -192,17 +190,6 @@ let testAudioActive = false;
 let pttActive = false;
 // Hands-free by default. PTT remains available as a fallback mode.
 const pttMode = false;
-
-const speakCriticalAnnouncement = (text: string): boolean => {
-  if (!service || !text.trim()) return false;
-  const estimatedMs = Math.max(
-    4_000,
-    Math.min(45_000, Array.from(text).length * 320 + 2_000),
-  );
-  criticalAnnouncementUntil = Date.now() + estimatedMs;
-  service.brain.speakRequestedReply(text);
-  return true;
-};
 
 /** Speak a proactive reminder through the active realtime voice session. */
 export const speakProactiveText = (text: string): boolean => {
@@ -864,12 +851,6 @@ const handleCapturePcm = (pcm16: Int16Array): void => {
   if (keywordPreroll.length > 50) {
     keywordPreroll.shift();
   }
-  if (assistantPlaybackActive && now < criticalAnnouncementUntil) {
-    speakerCandidateMs = 0;
-    headsetBargeMs = 0;
-    voiceFallbackMs = 0;
-    return;
-  }
   if (assistantPlaybackActive) {
     bargeSampleBuffer.push(pcm16.slice());
     if (bargeSampleBuffer.length > BARGE_SAMPLE_MAX_CHUNKS) {
@@ -1233,7 +1214,6 @@ const triggerBargeIn = (hardStop = false) => {
     bargeTrace.bargeAt = Date.now();
   }
   const wasPlaying = assistantPlaybackActive;
-  criticalAnnouncementUntil = 0;
   expectSpeakerBargeStop();
   assistantPlaybackActive = false;
   capturePreroll = [];
@@ -1466,14 +1446,6 @@ const registerVoiceIpc = () => {
   ipcMain.handle('cyrvis:gaze:inspection-status', () =>
     gazeInspector.getStatus(),
   );
-  ipcMain.handle('cyrvis:gaze:announce-calibration', () => {
-    if (!service) {
-      return { spoken: false, reason: '语音助手尚未启动' };
-    }
-    return speakCriticalAnnouncement(GAZE_CALIBRATION_NOTICE)
-      ? { spoken: true, text: GAZE_CALIBRATION_NOTICE }
-      : { spoken: false, reason: '语音助手尚未启动' };
-  });
   ipcMain.handle('cyrvis:gaze:inspect', async () => {
     proactiveGaze.snooze();
     service?.brain.clearGazeSuggestion();
@@ -1619,7 +1591,6 @@ const registerVoiceIpc = () => {
     captureService?.close();
     captureService = null;
     assistantPlaybackActive = false;
-    criticalAnnouncementUntil = 0;
     resetSpeakerDetection();
     keywordGate?.reset();
     broadcast('cyrvis:voice:response-stopped');
@@ -1953,7 +1924,6 @@ const registerVoiceIpc = () => {
       speakerBargeStopTimer = null;
     }
     assistantPlaybackActive = false;
-    criticalAnnouncementUntil = 0;
     keywordRejectUntil = 0;
     keywordGate?.reset();
     resetSpeakerDetection();

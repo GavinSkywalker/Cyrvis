@@ -1016,7 +1016,15 @@ export class VoiceBrain {
     this.lastFinalTranscript = transcriptKey;
     this.lastFinalAt = now;
     this.navigationExecutions = new Set();
+    // Keep main's concrete file requests in the file/tool router while the
+    // gaze action implementation follows the user's selected 78c6d8ce version.
+    const concreteFileRequest =
+      !/(正在看|看着的|注视|眼神|光标|高亮)/i.test(text) &&
+      /(最近|桌面上?|下载|文档|文件名|文件夹|路径|扩展名|\.[a-z0-9]{1,12}\b)/i.test(
+        text,
+      );
     const gazeAction =
+      !concreteFileRequest &&
       !this.options.fastToolRouter?.hasPendingConfirmation() &&
       this.options.getGazeActionContext
         ? gazeDesktopAction(text)
