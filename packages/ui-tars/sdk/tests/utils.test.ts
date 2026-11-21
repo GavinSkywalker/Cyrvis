@@ -252,6 +252,37 @@ describe('convertToOpenAIMessages', () => {
 });
 
 describe('preprocessResizeImage', () => {
+  it('preserves native JPEG bytes and sends the matching MIME without changing coordinates', async () => {
+    const image = new Jimp({ width: 320, height: 180, color: 0xff0000ff });
+    const original = (
+      await image.getBuffer('image/jpeg', { quality: 75 })
+    ).toString('base64');
+    const processed = await preprocessResizeImage(original, 320 * 180, 'jpeg');
+    expect(processed).toBe(original);
+    const decoded = await Jimp.read(Buffer.from(processed, 'base64'));
+    expect([decoded.width, decoded.height]).toEqual([320, 180]);
+    const messages = convertToOpenAIMessages({
+      conversations: [{ from: 'human', value: '<image>' }],
+      images: [processed],
+    });
+    expect(messages[0].content).toEqual([
+      {
+        type: 'image_url',
+        image_url: { url: `data:image/jpeg;base64,${original}` },
+      },
+    ]);
+  });
+
+  it('resizes to the pixel budget while keeping JPEG encoding when requested', async () => {
+    const image = new Jimp({ width: 600, height: 400, color: 0xff0000ff });
+    const png = (await image.getBuffer('image/png')).toString('base64');
+    const processed = await preprocessResizeImage(png, 60_000, 'jpeg');
+    expect(processed.startsWith('/9j/')).toBe(true);
+    const decoded = await Jimp.read(Buffer.from(processed, 'base64'));
+    expect(decoded.width * decoded.height).toBeLessThanOrEqual(60_000);
+    expect(decoded.width / decoded.height).toBeCloseTo(1.5, 1);
+  });
+
   const MAX_PIXELS = 512 * 28 * 28;
   // Testing util for creating a base64 image
   async function createTestImage(

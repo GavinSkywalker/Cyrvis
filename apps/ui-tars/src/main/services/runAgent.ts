@@ -181,7 +181,14 @@ export const runAgent = async (
     apiKey: settings.vlmApiKey,
     model: settings.vlmModelName,
     useResponsesApi: settings.useResponsesApi,
-    ...(seedModel ? { max_tokens: 384, timeout: 45_000 } : {}),
+    ...(seedModel
+      ? {
+          max_tokens: 384,
+          timeout: 30_000,
+          imageFormat: 'jpeg' as const,
+          imageMaxPixels: 512 * 28 * 28,
+        }
+      : {}),
   };
   let modelAuthHdrs: Record<string, string> = {};
 
@@ -211,6 +218,9 @@ export const runAgent = async (
     maxTokens: modelConfig.max_tokens,
     timeoutMs: modelConfig.timeout || 30_000,
     boundGaze: instructions.includes('\n[已绑定注视对象]'),
+    imageFormat: modelConfig.imageFormat || 'png',
+    imageMaxPixels: modelConfig.imageMaxPixels,
+    retryOnTimeout: !seedModel,
   });
 
   const guiAgent = new GUIAgent({
@@ -244,8 +254,9 @@ export const runAgent = async (
     },
     retry: {
       model: {
-        // Bounded request deadline plus one retry; no exponential minute-long sleeps.
+        // Retry a transient failure once; an expired Seed screenshot fails immediately.
         maxRetries: 1,
+        retryOnTimeout: !seedModel,
         minTimeoutMs: 1000,
         maxTimeoutMs: 1000,
         onRetry: (error, attempt) =>

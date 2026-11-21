@@ -82,6 +82,8 @@ export type Logger = Pick<Console, 'log' | 'error' | 'warn' | 'info'>;
 
 export interface RetryConfig {
   maxRetries: number;
+  /** False avoids repeating a stale screen request after its deadline. */
+  retryOnTimeout?: boolean;
   onRetry?: (error: Error, attempt: number) => void;
   minTimeoutMs?: number;
   maxTimeoutMs?: number;

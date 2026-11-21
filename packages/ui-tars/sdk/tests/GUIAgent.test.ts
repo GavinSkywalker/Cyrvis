@@ -139,6 +139,32 @@ describe('GUIAgent', () => {
     expect(onError).toHaveBeenCalledOnce();
   });
 
+  it('does not repeat a timed-out stale screenshot when timeout retries are disabled', async () => {
+    const model = new UITarsModel({ apiKey: 'test-key', model: 'test-model' });
+    const invoke = vi
+      .spyOn(model, 'invoke')
+      .mockRejectedValue(new Error('Request timed out.'));
+    const operator = new MockOperator();
+    const onError = vi.fn();
+    const agent = new GUIAgent({
+      model,
+      operator,
+      onError,
+      retry: {
+        model: {
+          maxRetries: 1,
+          retryOnTimeout: false,
+          minTimeoutMs: 1,
+          maxTimeoutMs: 1,
+        },
+      },
+    });
+    await agent.run('click');
+    expect(invoke).toHaveBeenCalledOnce();
+    expect(operator.execute).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledOnce();
+  });
+
   it('normal run', async () => {
     mockOpenAIResponse([
       "Thought: Click on the search bar at the top of the screen\nAction: click(start_box='(72,646)')",

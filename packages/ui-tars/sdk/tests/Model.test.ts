@@ -4,6 +4,8 @@
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { UITarsModel } from '../src/Model';
+import { preprocessResizeImage } from '../src/utils';
+import { UITarsModelVersion } from '@ui-tars/shared/types';
 
 // Mock OpenAI
 const mockCreate = vi.fn();
@@ -52,6 +54,55 @@ describe('UITarsModel', () => {
   });
 
   describe('ChatCompletion API', () => {
+    it('applies the requested screenshot encoding and sends JPEG with its correct MIME', async () => {
+      const model = new UITarsModel({
+        apiKey: 'test-key',
+        model: 'test-model',
+        imageFormat: 'jpeg',
+        imageMaxPixels: 60_000,
+      });
+      mockCreate.mockResolvedValue({
+        choices: [
+          {
+            message: {
+              content: "Action: click(point='<point>277 322</point>')",
+            },
+          },
+        ],
+      });
+      const result = await model.invoke({
+        conversations: [{ from: 'human', value: '<image>' }],
+        images: ['/9j/test'],
+        screenContext: { width: 1470, height: 956 },
+        uiTarsVersion: UITarsModelVersion.DOUBAO_1_5_20B,
+      });
+      expect(result.parsedPredictions[0].action_inputs).toMatchObject({
+        start_box: '[0.277,0.322,0.277,0.322]',
+        start_coords: [expect.closeTo(407.19, 2), expect.closeTo(307.832, 2)],
+      });
+      expect(preprocessResizeImage).toHaveBeenCalledWith(
+        '/9j/test',
+        60_000,
+        'jpeg',
+      );
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'image_url',
+                  image_url: { url: 'data:image/jpeg;base64,/9j/test' },
+                },
+              ],
+            },
+          ],
+        }),
+        expect.anything(),
+      );
+    });
+
     it('honors a configured model deadline instead of overriding it with 30 seconds', async () => {
       const model = new UITarsModel({
         apiKey: 'test-key',

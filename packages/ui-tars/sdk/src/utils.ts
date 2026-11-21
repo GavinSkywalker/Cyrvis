@@ -168,7 +168,9 @@ export const convertToOpenAIMessages = ({
           content: [
             {
               type: 'image_url',
-              image_url: { url: `data:image/png;base64,${images[imageIndex]}` },
+              image_url: {
+                url: `data:image/${images[imageIndex].startsWith('/9j/') ? 'jpeg' : 'png'};base64,${images[imageIndex]}`,
+              },
             },
           ],
         });
@@ -193,6 +195,7 @@ export function replaceBase64Prefix(base64: string) {
 export async function preprocessResizeImage(
   image_base64: string,
   maxPixels: number,
+  format: 'png' | 'jpeg' = 'png',
 ): Promise<string> {
   try {
     const imageBuffer = Buffer.from(image_base64, 'base64');
@@ -201,24 +204,28 @@ export async function preprocessResizeImage(
     const { width, height } = image.bitmap;
 
     const currentPixels = width * height;
+    // The native desktop operator already supplies JPEG. Preserve it exactly
+    // rather than decoding/re-encoding text or expanding a photo into PNG.
+    if (
+      format === 'jpeg' &&
+      currentPixels <= maxPixels &&
+      imageBuffer[0] === 0xff &&
+      imageBuffer[1] === 0xd8
+    )
+      return image_base64;
     if (currentPixels > maxPixels) {
       const resizeFactor = Math.sqrt(maxPixels / currentPixels);
       const newWidth = Math.floor(width * resizeFactor);
       const newHeight = Math.floor(height * resizeFactor);
 
-      const resized = await image
-        .resize({
-          w: newWidth,
-          h: newHeight,
-        })
-        .getBuffer('image/png', { quality: 60 });
-
-      return resized.toString('base64');
+      image.resize({ w: newWidth, h: newHeight });
     }
 
-    const base64 = await image.getBase64('image/png', { quality: 60 });
-
-    return replaceBase64Prefix(base64);
+    const encoded =
+      format === 'jpeg'
+        ? await image.getBuffer('image/jpeg', { quality: 75 })
+        : await image.getBuffer('image/png');
+    return encoded.toString('base64');
   } catch (error) {
     console.error('preprocessResizeImage error:', error);
     throw error;

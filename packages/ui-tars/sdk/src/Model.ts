@@ -38,6 +38,10 @@ type OpenAIChatCompletionCreateParams = Omit<ClientOptions, 'maxRetries'> &
   >;
 
 export interface UITarsModelConfig extends OpenAIChatCompletionCreateParams {
+  /** Keep photo-heavy desktop captures compact; defaults to lossless PNG. */
+  imageFormat?: 'png' | 'jpeg';
+  /** Optional cap for visual input; action coordinates retain the original screen dimensions. */
+  imageMaxPixels?: number;
   /** Whether to use OpenAI Response API instead of Chat Completions API */
   useResponsesApi?: boolean;
 }
@@ -111,6 +115,8 @@ export class UITarsModel extends Model {
       temperature = 0,
       top_p = 0.7,
       timeout = 30_000,
+      imageFormat: _imageFormat,
+      imageMaxPixels: _imageMaxPixels,
       ...restOptions
     } = this.modelConfig;
 
@@ -290,16 +296,33 @@ export class UITarsModel extends Model {
       `[UITarsModel] invoke: screenContext=${JSON.stringify(screenContext)}, scaleFactor=${scaleFactor}, uiTarsVersion=${uiTarsVersion}, useResponsesApi=${this.modelConfig.useResponsesApi}`,
     );
 
-    const maxPixels =
+    const defaultMaxPixels =
       uiTarsVersion === UITarsModelVersion.V1_5
         ? MAX_PIXELS_V1_5
         : uiTarsVersion === UITarsModelVersion.DOUBAO_1_5_15B ||
             uiTarsVersion === UITarsModelVersion.DOUBAO_1_5_20B
           ? MAX_PIXELS_DOUBAO
           : MAX_PIXELS_V1_0;
+    const requestedMaxPixels = this.modelConfig.imageMaxPixels;
+    const maxPixels =
+      typeof requestedMaxPixels === 'number' &&
+      Number.isFinite(requestedMaxPixels) &&
+      requestedMaxPixels >= 4096
+        ? Math.min(defaultMaxPixels, requestedMaxPixels)
+        : defaultMaxPixels;
     const compressedImages = await Promise.all(
-      images.map((image) => preprocessResizeImage(image, maxPixels)),
+      images.map((image) =>
+        preprocessResizeImage(image, maxPixels, this.modelConfig.imageFormat),
+      ),
     );
+    logger?.info('[UITarsModel] image payload', {
+      count: compressedImages.length,
+      format: this.modelConfig.imageFormat || 'png',
+      maxPixels,
+      encodedKiB: Math.round(
+        compressedImages.reduce((sum, image) => sum + image.length, 0) / 1024,
+      ),
+    });
 
     const messages = convertToOpenAIMessages({
       conversations,

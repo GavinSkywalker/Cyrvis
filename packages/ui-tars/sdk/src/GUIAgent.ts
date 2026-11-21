@@ -340,6 +340,15 @@ export class GUIAgent<T extends Operator> extends BaseGUIAgent<
               }
 
               const status = (error as { status?: number })?.status;
+              if (
+                retry?.model?.retryOnTimeout === false &&
+                /timed out|timeout/i.test(
+                  String((error as Error)?.message || (error as Error)?.name),
+                )
+              ) {
+                bail(error as Error);
+                return { prediction: '', parsedPredictions: [] };
+              }
               const code = (error as { code?: string })?.code || '';
               if (
                 [400, 401, 403, 404, 422].includes(status || 0) ||
